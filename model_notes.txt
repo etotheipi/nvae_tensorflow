@@ -1,0 +1,157 @@
+
+Conv2D -> [weight_norm, nn.conv2d]
+
+ConvBNSwish -> [Conv2D(bias=False, weight_norm=False), batch_norm, swish]
+BNSwishConv -> [batch_norm, swish, Conv2D(bias=True, weight_norm=True)]
+
+EncCombinerCell(x1,x2) -> x1 + Conv2d_1x1_(x2)
+DecCombinerCell(x1,x2) -> Conv2d_1x1_( x1 concat x2 )
+
+SqueezeExcite ...
+
+InvertedResidual ->
+        hidden_dim = int(round(Cin * ex))
+
+        layers0 = [] if self.upsample else []
+        layers = [nn.UpsamplingNearest2d(scale_factor=2) if upsample else Identity(),
+          get_batchnorm(Cin, eps=BN_EPS, momentum=0.05),
+                  ConvBNSwish(Cin, hidden_dim, k=1),
+                  ConvBNSwish(hidden_dim, hidden_dim, stride=self.stride, groups=groups, k=k, dilation=dil),
+                  Conv2D(hidden_dim, Cout, 1, 1, 0, bias=False, weight_norm=False),
+                  get_batchnorm(Cout, momentum=0.05)]
+
+Stem -> Conv2d_3x3  (channels=3 -> num_channels_enc)
+
+
+Cell(res_bnswish*2) -> [store_skip_conn, BNSwishConv(3x3, stride), BNSwishConv(3x3, stride), squeeze_excite]
+    normal_enc (strides=1)
+    normal_pre (strides=1)
+    down_enc   (strides=2)
+    down_pre   (strides=2)
+
+Cell(mconv_e6k5g0) -> [store_skip_conn, InvertedResidual(ex=6, k=5, g=0), squeeze_excite]
+    normal_dec (strides=1)
+    up_dec     (strides=-1)
+
+Cell(mconv_e3k5g0) -> [store_skip_conn, InvertedResidual(ex=3, k=5, g=0), squeeze_excite]
+    normal_post (strides=1)
+    up_post     (strides=-1)
+    
+
+
+
+AutoEncoder.forward():
+    s = stem(2*x - 1.0)
+
+    for cell in preproc:
+        s = cell(s)
+
+    for cell in enc_tower
+
+
+Assume params:
+   num_scales = 2
+   num_groups_per_scale = 2
+   num_cells_per_group = 3
+
+   preproc_blocks = 2
+   preproc_cells = 3
+
+   postproc_blocks = 2
+   postproc_cells = 3
+
+
+
+stem:
+    Conv2d_3x3(cin=3, cout=num_channels_enc)
+pre_process:
+    block0
+        Cell(res_bnswish*2)            (normal_pre)
+        Cell(res_bnswish*2)            (normal_pre)
+        Cell(res_bnswish*2, strides=2) (down_pre)
+    block1
+        Cell(res_bnswish*2)            (normal_pre)
+        Cell(res_bnswish*2)            (normal_pre)
+        Cell(res_bnswish*2, strides=2) (down_pre)
+encoder_tower:
+    scale0 g0 
+        Cell(res_bnswish*2)
+        Cell(res_bnswish*2)
+        Cell(res_bnswish*2)  Cell(combiner_enc)
+    scale0 g1
+        Cell(res_bnswish*2)
+        Cell(res_bnswish*2)
+        Cell(res_bnswish*2)  Cell(combiner_enc)
+
+        Cell(res_bnswish*2, strides=2)
+        
+    scale1 g0 
+        Cell(res_bnswish*2)
+        Cell(res_bnswish*2)
+        Cell(res_bnswish*2)  Cell(combiner_enc)
+    scale1 g1
+        Cell(res_bnswish*2)
+        Cell(res_bnswish*2)
+        Cell(res_bnswish*2)  Cell(combiner_enc)
+
+        #Cell(res_bnswish*2, strides=2) # omit on the last scale
+
+encoder0
+    ELU(s)
+    Conv2D(N, N, 1x1, bias=True)(s)
+    ELU(s)
+
+normal_sampler
+    encoder_sampler:
+        scale0 g0 Conv2D(_, 2*latent_per_group, 3x3)
+        scale0 g1 Conv2D(_, 2*latent_per_group, 3x3)
+        mult = mult / CHANNEL_MULT
+        scale1 g0 Conv2D(_, 2*latent_per_group, 3x3)
+        scale1 g1 Conv2D(_, 2*latent_per_group, 3x3)
+
+    decoder_sampler:
+        scale0 g0         # scale,group = 0,0 omits first decoder Conv)
+        scale0 g1 [ELU, Conv2D(_, 2*latent_per_group, 1x1)]
+        mult = mult / CHANNEL_MULT
+        scale1 g0 [ELU, Conv2D(_, 2*latent_per_group, 1x1)]
+        scale1 g1 [ELU, Conv2D(_, 2*latent_per_group, 1x1)]
+
+
+decoder_tower:
+    scale0 g0 
+    # omit on scale,group=0,0
+        #Cell(ex=6, k=5, g=0)
+        #Cell(ex=6, k=5, g=0)
+        #Cell(ex=6, k=5, g=0)  Cell(combiner_dec)
+    scale0 g1
+        Cell(ex=6, k=5, g=0)
+        Cell(ex=6, k=5, g=0)
+        Cell(ex=6, k=5, g=0)  Cell(combiner_dec)
+
+        Cell(ex=6, k=5, g=0, strides=-1)
+        
+
+    scale1 g0 
+        Cell(ex=6, k=5, g=0)
+        Cell(ex=6, k=5, g=0)
+        Cell(ex=6, k=5, g=0)  Cell(combiner_dec)
+    scale1 g1
+        Cell(ex=6, k=5, g=0)
+        Cell(ex=6, k=5, g=0)
+        Cell(ex=6, k=5, g=0)  Cell(combiner_dec)
+
+        #Cell(ex=6, k=5, g=0, strides=-1) # omit on last scale
+
+post_process:
+    block0
+        Cell(ex=3, k=5, g=0, strides=-1)  (up_post)
+        Cell(ex=3, k=5, g=0               (normal_post)
+        Cell(ex=3, k=5, g=0               (up_post)
+    block
+        Cell(ex=3, k=5, g=0, strides=-1)  (up_post)
+        Cell(ex=3, k=5, g=0               (normal_post)
+        Cell(ex=3, k=5, g=0               (up_post)
+
+img_conditional
+    ELU()
+    Conv2d_3x3(cin=num_channels_enc, cout=3)
