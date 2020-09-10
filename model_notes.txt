@@ -1,3 +1,26 @@
+OPS = OrderedDict([
+    ('res_elu', lambda Cin, Cout, stride: ELUConv(Cin, Cout, 3, stride, 1)),
+    ('res_bnelu', lambda Cin, Cout, stride: BNELUConv(Cin, Cout, 3, stride, 1)),
+    ('res_bnswish', lambda Cin, Cout, stride: BNSwishConv(Cin, Cout, 3, stride, 1)),
+    ('res_bnswish5', lambda Cin, Cout, stride: BNSwishConv(Cin, Cout, 3, stride, 2, 2)),
+    ('mconv_e6k5g0', lambda Cin, Cout, stride: InvertedResidual(Cin, Cout, stride, ex=6, dil=1, k=5, g=0)),
+    ('mconv_e3k5g0', lambda Cin, Cout, stride: InvertedResidual(Cin, Cout, stride, ex=3, dil=1, k=5, g=0)),
+    ('mconv_e3k5g8', lambda Cin, Cout, stride: InvertedResidual(Cin, Cout, stride, ex=3, dil=1, k=5, g=8)),
+    ('mconv_e6k11g0', lambda Cin, Cout, stride: InvertedResidual(Cin, Cout, stride, ex=6, dil=1, k=11, g=0)),
+])
+
+    elif arch_type == 'res_mbconv':
+        arch_cells = dict()
+        arch_cells['normal_enc'] = ['res_bnswish', 'res_bnswish']
+        arch_cells['down_enc'] = ['res_bnswish', 'res_bnswish']
+        arch_cells['normal_dec'] = ['mconv_e6k5g0']
+        arch_cells['up_dec'] = ['mconv_e6k5g0']
+        arch_cells['normal_pre'] = ['res_bnswish', 'res_bnswish']
+        arch_cells['down_pre'] = ['res_bnswish', 'res_bnswish']
+        arch_cells['normal_post'] = ['mconv_e3k5g0']
+        arch_cells['up_post'] = ['mconv_e3k5g0']
+        arch_cells['ar_nn'] = ['']
+        
 
 Conv2D -> [weight_norm, nn.conv2d]
 
@@ -64,6 +87,7 @@ Assume params:
 
 stem:
     Conv2d_3x3(cin=3, cout=num_channels_enc)
+    
 pre_process:
     block0
         Cell(res_bnswish*2)            (normal_pre)
@@ -73,6 +97,7 @@ pre_process:
         Cell(res_bnswish*2)            (normal_pre)
         Cell(res_bnswish*2)            (normal_pre)
         Cell(res_bnswish*2, strides=2) (down_pre)
+        
 encoder_tower:
     scale0 g0 
         Cell(res_bnswish*2)
