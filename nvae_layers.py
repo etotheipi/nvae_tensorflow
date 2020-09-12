@@ -7,7 +7,10 @@ class SqueezeExciteLayer(L.Layer):
     def __init__(self, ratio, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ratio = ratio
-        
+        self.pool = None
+        self.dense1 = None
+        self.dense2 = None
+
     def build(self, input_shape):
         orig_size = input_shape[-1]
         squeeze_size = max(orig_size // self.ratio, 4)
@@ -37,7 +40,7 @@ class NvaeConv2D(tf.keras.layers.Layer):
                  upsample=False,
                  depthwise=False,
                  use_bias=True,
-                 weight_norm=True,
+                 weight_norm=False,
                  spectral_norm=False,
                  dilation_rate=1,
                  activation='linear',
@@ -48,8 +51,9 @@ class NvaeConv2D(tf.keras.layers.Layer):
         """
         A wrapper around tf.keras.layers.Conv2D to streamline inclusion of common ops, primarily
         weight/spectral normalization, and choosing depthwise convolutions.  Also designed to 
-        accommodate chaining Conv2D layers without specifying number of filters, instead declaring
-        channel-scaling factors relative to inputs (i.e. 2 for doubling channels, -2 for halving)
+        accommodate chaining Conv2D layers without specifying number of filters or image sizes,
+        instead declaring channel-scaling factors relative to inputs and simply indicating
+        upsampling or downsampling image size.
         
         In most cases, we will be using one of the following constructs:
         
@@ -73,6 +77,9 @@ class NvaeConv2D(tf.keras.layers.Layer):
         self.padding = padding
         self.channels_in = None
 
+        self.conv = None
+        self.conv_depth1x1 = None
+
         assert not (downsample and upsample), 'Cannot upsample and downsample simultaneously'
         assert [self.scale_channels, self.abs_channels] != [None, None], "Specify at either scale_channels, or abs_filt"
         # NVLabs implementation uses -1 to indicate (2,2) upsampling.
@@ -89,7 +96,6 @@ class NvaeConv2D(tf.keras.layers.Layer):
             else:
                 assert self.channels_in % abs(self.scale_channels) == 0, "Input channels not a multiple of scalar"
                 self.abs_channels = self.channels_in // abs(self.scale_channels)
-
 
         self.conv = L.Conv2D(
             filters=self.abs_channels,
@@ -117,7 +123,6 @@ class NvaeConv2D(tf.keras.layers.Layer):
         else:
             print('Spectral Norm is disabled!')
 
-                
     def call(self, x, training=False):
         if self.upsample:
             x = self.upsample_layer(x)
@@ -125,11 +130,10 @@ class NvaeConv2D(tf.keras.layers.Layer):
         x = self.conv(x, training=training)
 
         if self.depthwise:
-            x = self.conv_depth1x1(x)
+            x = self.conv_depth1x1(x, training=training)
 
         return x
        
-
     def get_config(self):
         # TODO: UPDATE this
         cfg = super().get_config()
@@ -148,16 +152,16 @@ class NvaeConv2D(tf.keras.layers.Layer):
 
 class ResidualDecoderCell(L.Layer):
     def __init__(self,
-            upsample=False,
-            expand_ratio=6,
-            se_ratio=8,
-            bn_momentum=0.95,
-            gamma_reg=None,
-            use_bias=True,
-            res_scalar=0.1,
-            *args,
-            **kwargs):
-        
+                 upsample=False,
+                 expand_ratio=6,
+                 se_ratio=16,
+                 bn_momentum=0.95,
+                 gamma_reg=None,
+                 use_bias=True,
+                 res_scalar=0.1,
+                 *args,
+                 **kwargs):
+
         super().__init__(*args, **kwargs)
         self.expand_ratio = expand_ratio
         self.se_ratio = se_ratio
@@ -174,6 +178,7 @@ class ResidualDecoderCell(L.Layer):
         self.upsample_conv1x1 = None
 
     def build(self, input_shape):
+        print('ResDecCell build shape:', input_shape)
         # Num channels, and num expanded channels
         # TODO: All these Conv2Ds need spectral-normalization and weight-normalization!
         num_c = input_shape[-1]
@@ -187,34 +192,46 @@ class ResidualDecoderCell(L.Layer):
 
         # Depthwise separable convolution, with possible upsample
         if self.upsample:
-            self.conv_depthw = NvaeConv2D(kernel_size=(5, 5), depthwise=True, upsample=True, scale_channels=-2)
+            self.conv_depthw = NvaeConv2D(kernel_size=(5, 5),
+                                          depthwise=True,
+                                          upsample=True,
+                                          scale_channels=-2,
+                                          use_bias=False,
+                                          weight_norm=False)
             self.upsample_residual = NvaeConv2D(kernel_size=(1,1), upsample=True, scale_channels=-2)
         else:
-            self.conv_depthw = NvaeConv2D(kernel_size=(5, 5), depthwise=True)
+            self.conv_depthw = NvaeConv2D(kernel_size=(5, 5),
+                                          depthwise=True,
+                                          use_bias=False,
+                                          weight_norm=False)
             
-        self.conv_reduce = NvaeConv2D(kernel_size=(1, 1), scale_channels=-self.expand_ratio, use_bias=False)
+        self.conv_reduce = NvaeConv2D(kernel_size=(1, 1),
+                                      scale_channels=-self.expand_ratio,
+                                      use_bias=False,
+                                      weight_norm=False)
+
         self.se_layer = SqueezeExciteLayer(self.se_ratio)
 
     def call(self, batch_input, training=None):
         x = batch_input
 
         x = self.bn_layers[0](x, training=training)
-        x = self.conv_expand(x)
+        x = self.conv_expand(x, training=training)
 
         x = self.bn_layers[1](x, training=training)
         x = tf.keras.activations.swish(x)
-        x = self.conv_depthw(x)
+        x = self.conv_depthw(x, training=training)
 
         x = self.bn_layers[2](x, training=training)
         x = tf.keras.activations.swish(x)
-        x = self.conv_reduce(x)
+        x = self.conv_reduce(x, training=training)
 
         x = self.bn_layers[3](x, training=training)
-        x = self.se_layer(x)
+        x = self.se_layer(x, training=training)
 
         residual = batch_input
         if self.upsample:
-            residual = self.upsample_residual(residual)
+            residual = self.upsample_residual(residual, training=training)
             
         output = L.Add()([residual, self.res_scalar * x])
         
@@ -262,15 +279,15 @@ class ResidualDecoderCell(L.Layer):
 
 class ResidualEncoderCell(L.Layer):
     def __init__(self,
-            downsample=False,
-            se_ratio=8,
-            bn_momentum=0.95,
-            gamma_reg=None,
-            use_bias=True,
-            res_scalar=0.1,
-            *args,
-            **kwargs):
-        
+                 downsample=False,
+                 se_ratio=16,
+                 bn_momentum=0.95,
+                 gamma_reg=None,
+                 use_bias=True,
+                 res_scalar=0.1,
+                 *args,
+                 **kwargs):
+
         super().__init__(*args, **kwargs)
         self.se_ratio = se_ratio
         self.bn_momentum = bn_momentum
@@ -279,46 +296,47 @@ class ResidualEncoderCell(L.Layer):
         self.downsample = downsample
         self.res_scalar = res_scalar
 
-    def build(self, input_shape):
-        num_c = input_shape[-1]
+        self.bn0 = None
+        self.bn1 = None
+        self.conv_3x3s_0 = None
+        self.conv_3x3s_1 = None
+        self.se_layer = None
+        self.downsample_layer = None
 
-        self.bn_layers = [L.BatchNormalization(
-            momentum=self.bn_momentum,
-            gamma_regularizer=self.gamma_reg) for _ in range(2)]
+    def build(self, input_shape):
+        print('ResEncCell build shape:', input_shape)
 
         self.bn0 = L.BatchNormalization(momentum=self.bn_momentum, gamma_regularizer=self.gamma_reg)
         self.bn1 = L.BatchNormalization(momentum=self.bn_momentum, gamma_regularizer=self.gamma_reg)
 
         if self.downsample:
             self.conv_3x3s_0 = NvaeConv2D(kernel_size=(3, 3), downsample=True, scale_channels=2)
+            self.conv_3x3s_1 = NvaeConv2D(kernel_size=(3, 3))
         else:
             self.conv_3x3s_0 = NvaeConv2D(kernel_size=(3, 3))
-            
-        self.conv_3x3s_1 = NvaeConv2D(kernel_size=(3, 3))
+            self.conv_3x3s_1 = NvaeConv2D(kernel_size=(3, 3))
 
         self.se_layer = SqueezeExciteLayer(self.se_ratio)
         
-        self.downsampler = None
         if self.downsample:
-            self.downsampler = FactorizedDownsample()
-
+            self.downsample_layer = FactorizedDownsample()
 
     def call(self, batch_input, training=None):
         x = batch_input
 
         x = self.bn0(x, training=training)
         x = tf.keras.activations.swish(x)
-        x = self.conv_3x3s_0(x)
+        x = self.conv_3x3s_0(x, training=training)
 
         x = self.bn1(x, training=training)
         x = tf.keras.activations.swish(x)
-        x = self.conv_3x3s_1(x)
+        x = self.conv_3x3s_1(x, training=training)
 
         x = self.se_layer(x)
 
         residual = batch_input
         if self.downsample:
-            residual = self.downsampler(residual)
+            residual = self.downsample_layer(residual, training=training)
             
         output = L.Add()([residual, self.res_scalar * x])
         
@@ -328,11 +346,11 @@ class ResidualEncoderCell(L.Layer):
         # This is really just so I can see a summary and use plot_model
         x = inputs = L.Input(input_shape_3d)
         
-        x = self.bn0(x, training=training)
+        x = self.bn0(x)
         x = tf.keras.activations.swish(x)
         x = self.conv_3x3s_0(x)
 
-        x = self.bn1(x, training=training)
+        x = self.bn1(x)
         x = tf.keras.activations.swish(x)
         x = self.conv_3x3s_1(x)
 
@@ -359,29 +377,32 @@ class FactorizedDownsample(L.Layer):
     def __init__(self, channels_out=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.channels_out = channels_out
-        
+
+        self.conv1 = None
+        self.conv2 = None
+        self.conv3 = None
+        self.conv4 = None
+
     def build(self, input_shape):
+        print('FactDown build shape:', input_shape)
         channels_in = input_shape[-1]
         if self.channels_out is None:
             self.channels_out = channels_in * 2
 
         quarter = self.channels_out // 4
         lastqrt = self.channels_out - 3 * quarter
-        print(channels_in, self.channels_out, quarter, lastqrt)
         self.conv1 = L.Conv2D(filters=quarter, kernel_size=(1, 1), strides=(2, 2), padding='same')
         self.conv2 = L.Conv2D(filters=quarter, kernel_size=(1, 1), strides=(2, 2), padding='same')
         self.conv3 = L.Conv2D(filters=quarter, kernel_size=(1, 1), strides=(2, 2), padding='same')
         self.conv4 = L.Conv2D(filters=lastqrt, kernel_size=(1, 1), strides=(2, 2), padding='same')
-        
 
-    def call(self, batch_input):
-        stack1 = self.conv1(batch_input[:, :, :, :])
-        stack2 = self.conv2(batch_input[:, 1:, :, :])
-        stack3 = self.conv3(batch_input[:, :, 1:, :])
-        stack4 = self.conv4(batch_input[:, 1:, 1:, :])
+    def call(self, batch_input, training=False):
+        stack1 = self.conv1(batch_input[:, :, :, :], training=training)
+        stack2 = self.conv2(batch_input[:, 1:, :, :], training=training)
+        stack3 = self.conv3(batch_input[:, :, 1:, :], training=training)
+        stack4 = self.conv4(batch_input[:, 1:, 1:, :], training=training)
 
         out = L.Concatenate(axis=-1)([stack1, stack2, stack3, stack4])
-        print(stack1.shape, stack2.shape, stack3.shape, stack4.shape, out.shape)
         return out
 
     def get_config(self):
@@ -392,23 +413,22 @@ class FactorizedDownsample(L.Layer):
 
 class KLDivergence:
     @staticmethod
-    def vs_unit_normal(self, mu, log_var):
+    def vs_unit_normal(mu, log_var):
         return -0.5 * tf.reduce_mean(log_var - tf.square(mu) - tf.exp(log_var) + 1)
     
     # This would be useful for the residual-normal construct
     @staticmethod
-    def two_guassians(self, mu1, sigma_sq_1, mu2, sigma_sq_2):
+    def two_guassians(mu1, sigma_sq_1, mu2, sigma_sq_2):
         # https://stats.stackexchange.com/a/7449
         term1 = 0.5 * tf.math.log(sigma_sq_2 / sigma_sq_1)
         term2 = (sigma_sq_1 + (mu1 - mu2) ** 2) / (2 * sigma_sq_2)
-        return term1 + term2 - 0.5
+        return tf.reduce_mean(term1 + term2 - 0.5)
 
     @staticmethod
-    def two_guassians_log_var(self, mu1, logvar_1, mu2, logvar_2):
+    def two_guassians_log_var(mu1, logvar_1, mu2, logvar_2):
         term1 = 0.5 * (logvar_2 - logvar_1)
         term2 = (tf.exp(logvar_1) + (mu1 - mu2) ** 2) / (2 * tf.exp(logvar_2))
-        return term1 + term2 - 0.5
-
+        return tf.reduce_mean(term1 + term2 - 0.5)
 
 
 class Sampling(L.Layer):
@@ -418,9 +438,25 @@ class Sampling(L.Layer):
     def __init__(self, loss_scalar=1.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.loss_scalar = loss_scalar
+        self.sample_out_shape = None
 
+    def build(self, input_shape):
+        print('Sampling build shape:', input_shape)
+        if isinstance(input_shape, (tuple, list)):
+            shape1, shape2 = input_shape
+            assert list(shape1) == list(shape2), 'Inputs to Sampling layer'
+        else:
+            # One tensor passed in, needs to be split into two:
+            shape1 = input_shape[:-1] + (input_shape[-1] // 2,)
+
+        self.sample_out_shape = shape1
+        
     def call(self, inputs, training=False):
-        z_mean, z_log_var = inputs
+        if isinstance(inputs, (tuple, list)):
+            z_mean, z_log_var = inputs
+        else:
+            z_mean = inputs[:, :, :, self.sample_out_shape[-1]:]
+            z_log_var = inputs[:, :, :, :self.sample_out_shape[-1]]
 
         kl_loss = KLDivergence.vs_unit_normal(z_mean, z_log_var)
         self.add_loss(self.loss_scalar * kl_loss)
@@ -428,14 +464,11 @@ class Sampling(L.Layer):
         if not training:
             return z_mean
 
-        batch = tf.shape(z_mean)[0]
-        dim = tf.shape(z_mean)[1]
-        epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
-
+        epsilon = tf.keras.backend.random_normal(shape=z_log_var.shape)
         return z_mean + tf.exp(0.5 * z_log_var) * epsilon
 
     def compute_output_shape(self, input_shape):
-        print(input_shape)
+        return self.sample_out_shape
 
     def get_config(self):
         cfg = super().get_config()
@@ -446,26 +479,37 @@ class Sampling(L.Layer):
 
 
 
-class CombineSampler(L.Layer):
+class CombinerSampler(L.Layer):
     """
     We initialize with the output of the encoder side, which is created before 
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, kl_loss_scalar=1.0, *args,  **kwargs):
         super().__init__(*args, **kwargs)
+        self.kl_loss_scalar = kl_loss_scalar
         
     def build(self, input_shape):
+        left_shape, right_shape = input_shape
+        print('CombSample build shape:', input_shape)
+        assert list(left_shape) == list(right_shape), f'Inputs to combiner cell are not the same {left_shape} != {right_shape}'
+        self.base_num_channels = left_shape[-1]
+        
         self.conv_left = NvaeConv2D(kernel_size=(1, 1), activation='relu')
         self.conv_right = NvaeConv2D(kernel_size=(1, 1), activation='relu')
         self.conv_concat = NvaeConv2D(kernel_size=(1, 1), activation='relu')
-        self.sampling = Sampling()
+        self.sampling = Sampling(loss_scalar=self.kl_loss_scalar)
         
-    def call(self, enc_dec_pair):
+    def call(self, enc_dec_pair, training=False):
         left, right = enc_dec_pair
         
-        left = self.conv_left(left)
-        right = self.conv_right(right)
+        left = self.conv_left(left, training=training)
+        right = self.conv_right(right, training=training)
         merge = L.Concatenate(axis=-1)([left, right])
-        return self.conv_concat(merge)
+        out2x = self.conv_concat(merge, training=training)
+        
+        out_mu = out2x[:, :, :, :self.base_num_channels]
+        out_logvar = out2x[:, :, :, self.base_num_channels:]
+        
+        return self.sampling([out_mu, out_logvar], training=training)
         
         
         

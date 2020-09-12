@@ -1,3 +1,4 @@
+# From the NVLabs code
 OPS = OrderedDict([
     ('res_elu', lambda Cin, Cout, stride: ELUConv(Cin, Cout, 3, stride, 1)),
     ('res_bnelu', lambda Cin, Cout, stride: BNELUConv(Cin, Cout, 3, stride, 1)),
@@ -9,39 +10,42 @@ OPS = OrderedDict([
     ('mconv_e6k11g0', lambda Cin, Cout, stride: InvertedResidual(Cin, Cout, stride, ex=6, dil=1, k=11, g=0)),
 ])
 
-    elif arch_type == 'res_mbconv':
-        arch_cells = dict()
-        arch_cells['normal_enc'] = ['res_bnswish', 'res_bnswish']
-        arch_cells['down_enc'] = ['res_bnswish', 'res_bnswish']
-        arch_cells['normal_dec'] = ['mconv_e6k5g0']
-        arch_cells['up_dec'] = ['mconv_e6k5g0']
-        arch_cells['normal_pre'] = ['res_bnswish', 'res_bnswish']
-        arch_cells['down_pre'] = ['res_bnswish', 'res_bnswish']
-        arch_cells['normal_post'] = ['mconv_e3k5g0']
-        arch_cells['up_post'] = ['mconv_e3k5g0']
-        arch_cells['ar_nn'] = ['']
+# The default architecture string in the NVLabs code is 'res_mbconv'
+elif arch_type == 'res_mbconv':
+    arch_cells = dict()
+    arch_cells['normal_enc'] = ['res_bnswish', 'res_bnswish']
+    arch_cells['down_enc'] = ['res_bnswish', 'res_bnswish']
+    arch_cells['normal_dec'] = ['mconv_e6k5g0']
+    arch_cells['up_dec'] = ['mconv_e6k5g0']
+    arch_cells['normal_pre'] = ['res_bnswish', 'res_bnswish']
+    arch_cells['down_pre'] = ['res_bnswish', 'res_bnswish']
+    arch_cells['normal_post'] = ['mconv_e3k5g0']
+    arch_cells['up_post'] = ['mconv_e3k5g0']
+    arch_cells['ar_nn'] = ['']
         
 
-Conv2D -> [weight_norm, nn.conv2d]
+# All batch_norms use momentum=0.95 (or 1-0.95=0.05 if in Torch)
+Base Conv2D -> [weight_norm, nn.conv2d]
+(DECODER) ConvBNSwish -> [Conv2D(bias=False, weight_norm=False), batch_norm, swish]
+(ENCODER) BNSwishConv -> [batch_norm, swish, Conv2D(bias=True, weight_norm=True)]
 
-ConvBNSwish -> [Conv2D(bias=False, weight_norm=False), batch_norm, swish]
-BNSwishConv -> [batch_norm, swish, Conv2D(bias=True, weight_norm=True)]
+EncCombinerCell(x1,x2) -> x1 + Conv2d_1x1(x2)
+DecCombinerCell(x1,x2) -> Conv2d_1x1(x1 concat x2)
 
-EncCombinerCell(x1,x2) -> x1 + Conv2d_1x1_(x2)
-DecCombinerCell(x1,x2) -> Conv2d_1x1_( x1 concat x2 )
-
-SqueezeExcite ...
+SqueezeExcite -- Standard, use max(c//16, 4) for the squeeze part
 
 InvertedResidual ->
-        hidden_dim = int(round(Cin * ex))
+    hidden_dim = int(round(Cin * ex))
 
-        layers0 = [] if self.upsample else []
-        layers = [nn.UpsamplingNearest2d(scale_factor=2) if upsample else Identity(),
-          get_batchnorm(Cin, eps=BN_EPS, momentum=0.05),
-                  ConvBNSwish(Cin, hidden_dim, k=1),
-                  ConvBNSwish(hidden_dim, hidden_dim, stride=self.stride, groups=groups, k=k, dilation=dil),
-                  Conv2D(hidden_dim, Cout, 1, 1, 0, bias=False, weight_norm=False),
-                  get_batchnorm(Cout, momentum=0.05)]
+    layers0 = [] if self.upsample else []
+    layers = [
+        nn.UpsamplingNearest2d(scale_factor=2) if upsample else Identity(),
+        get_batchnorm(Cin, eps=BN_EPS, momentum=0.05),
+	ConvBNSwish(Cin, hidden_dim, k=1),
+	ConvBNSwish(hidden_dim, hidden_dim, stride=self.stride, groups=groups, k=k, dilation=dil),
+	Conv2D(hidden_dim, Cout, 1, 1, 0, bias=False, weight_norm=False),
+	get_batchnorm(Cout, momentum=0.05)
+    ]
 
 Stem -> Conv2d_3x3  (channels=3 -> num_channels_enc)
 
@@ -171,11 +175,11 @@ post_process:
     block0
         Cell(ex=3, k=5, g=0, strides=-1)  (up_post)
         Cell(ex=3, k=5, g=0               (normal_post)
-        Cell(ex=3, k=5, g=0               (up_post)
+        Cell(ex=3, k=5, g=0               (normal_post)
     block
         Cell(ex=3, k=5, g=0, strides=-1)  (up_post)
         Cell(ex=3, k=5, g=0               (normal_post)
-        Cell(ex=3, k=5, g=0               (up_post)
+        Cell(ex=3, k=5, g=0               (normal_post)
 
 img_conditional
     ELU()
