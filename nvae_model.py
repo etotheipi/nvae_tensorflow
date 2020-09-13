@@ -171,7 +171,7 @@ def create_nvae(
     #####
     # Tail (opposite stem)
     x = tf.keras.activations.elu(x)
-    x = outputs = NvaeConv2D(kernel_size=(3, 3), abs_channels=orig_chan, name='tail_stem')(x)
+    x = outputs = NvaeConv2D(kernel_size=(3, 3), abs_channels=orig_chan, name='tail_stem', activation='relu')(x)
     
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     model.h0 = h0
