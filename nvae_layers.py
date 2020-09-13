@@ -41,7 +41,7 @@ class NvaeConv2D(tf.keras.layers.Layer):
                  depthwise=False,
                  use_bias=True,
                  weight_norm=False,
-                 spectral_norm=False,
+                 spectral_norm=True,
                  dilation_rate=1,
                  activation='linear',
                  padding='same',
@@ -178,7 +178,7 @@ class ResidualDecoderCell(L.Layer):
         self.upsample_conv1x1 = None
 
     def build(self, input_shape):
-        print('ResDecCell build shape:', input_shape)
+        #print('ResDecCell build shape:', input_shape)
         # Num channels, and num expanded channels
         # TODO: All these Conv2Ds need spectral-normalization and weight-normalization!
         num_c = input_shape[-1]
@@ -304,7 +304,7 @@ class ResidualEncoderCell(L.Layer):
         self.downsample_layer = None
 
     def build(self, input_shape):
-        print('ResEncCell build shape:', input_shape)
+        #print('ResEncCell build shape:', input_shape)
 
         self.bn0 = L.BatchNormalization(momentum=self.bn_momentum, gamma_regularizer=self.gamma_reg)
         self.bn1 = L.BatchNormalization(momentum=self.bn_momentum, gamma_regularizer=self.gamma_reg)
@@ -384,7 +384,7 @@ class FactorizedDownsample(L.Layer):
         self.conv4 = None
 
     def build(self, input_shape):
-        print('FactDown build shape:', input_shape)
+        #print('FactDown build shape:', input_shape)
         channels_in = input_shape[-1]
         if self.channels_out is None:
             self.channels_out = channels_in * 2
@@ -441,7 +441,7 @@ class Sampling(L.Layer):
         self.sample_out_shape = None
 
     def build(self, input_shape):
-        print('Sampling build shape:', input_shape)
+        #print('Sampling build shape:', input_shape)
         if isinstance(input_shape, (tuple, list)):
             shape1, shape2 = input_shape
             assert list(shape1) == list(shape2), 'Inputs to Sampling layer'
@@ -464,7 +464,7 @@ class Sampling(L.Layer):
         if not training:
             return z_mean
 
-        epsilon = tf.keras.backend.random_normal(shape=z_log_var.shape)
+        epsilon = tf.random.normal(shape=tf.shape(z_log_var))
         return z_mean + tf.exp(0.5 * z_log_var) * epsilon
 
     def compute_output_shape(self, input_shape):
@@ -489,7 +489,7 @@ class CombinerSampler(L.Layer):
         
     def build(self, input_shape):
         left_shape, right_shape = input_shape
-        print('CombSample build shape:', input_shape)
+        #print('CombSample build shape:', input_shape)
         assert list(left_shape) == list(right_shape), f'Inputs to combiner cell are not the same {left_shape} != {right_shape}'
         self.base_num_channels = left_shape[-1]
         

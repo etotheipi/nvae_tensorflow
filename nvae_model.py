@@ -120,9 +120,11 @@ def create_nvae(
     sample0 = Sampling()(x)
     
     # Can we use variables within functional models?  Well what we want is just a 
-    h0 = tf.Variable(shape=h0_shape, trainable=True, initial_value=tf.random.normal(h0_shape), name='h_peak')
-    
+    #h0 = tf.Variable(shape=h0_shape, trainable=True, initial_value=tf.random.normal(h0_shape), name='h_peak')
+    h0 = tf.constant(tf.zeros(shape=h0_shape))
+
     x = h0 + sample0
+    #x = sample0
     
     #####
     # Decoder Tower -- aggregate combine_samplers after each group
@@ -167,9 +169,9 @@ def create_nvae(
             
             
     #####
-    # Post-stem
+    # Tail (opposite stem)
     x = tf.keras.activations.elu(x)
-    x = outputs = NvaeConv2D(kernel_size=(3, 3), abs_channels=orig_chan, name='post_stem')(x)
+    x = outputs = NvaeConv2D(kernel_size=(3, 3), abs_channels=orig_chan, name='tail_stem')(x)
     
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     model.h0 = h0

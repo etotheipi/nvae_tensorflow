@@ -32,18 +32,25 @@ class LfwDataset:
             
         return tf.image.resize(img, [new_side, new_side])
         
-    def tfds_load(self, scale=1, load_sample=False):
-        if not load_sample:
+    def tfds_load(self, scale=1, load_count=None):
+        if load_count is None:
+            # This loads everything by percentages of the whole dataset
             train_ds_unbatched, train_info = tfds.load('lfw', split='train[:80%]', with_info=True)
             val_ds_unbatched, val_info = tfds.load('lfw', split='train[80%:90%]', with_info=True)
             test_ds_unbatched, test_info = tfds.load('lfw', split='train[90%:]', with_info=True)
         else:
-            train_ds_unbatched, train_info = tfds.load('lfw', split='train[:32]', with_info=True)
-            val_ds_unbatched, val_info = tfds.load('lfw', split='train[32:64]', with_info=True)
-            test_ds_unbatched, test_info = tfds.load('lfw', split='train[64:96]', with_info=True)
+            # For experimentation we might load just a subset
+            train_ct = int(load_count * 0.8)
+            val_ct = int(load_count * 0.1) + train_ct
+            test_ct = int(load_count * 0.1) + val_ct
+            tr_split = f'train[:{train_ct}]'
+            vl_split = f'train[{train_ct}:{val_ct}]'
+            ts_split = f'train[{val_ct}:{test_ct}]'
+            train_ds_unbatched, train_info = tfds.load('lfw', split=tr_split, with_info=True)
+            val_ds_unbatched, val_info = tfds.load('lfw', split=vl_split, with_info=True)
+            test_ds_unbatched, test_info = tfds.load('lfw', split=ts_split, with_info=True)
             
         sizes = []
-
 
         train_ds_unbatched = train_ds_unbatched.map(LfwDataset.scale_and_crop_img).shuffle(1000)
         val_ds_unbatched = val_ds_unbatched.map(LfwDataset.scale_and_crop_img)
@@ -57,11 +64,9 @@ class LfwDataset:
 
         samples = []
         for ds in [train_ds_unbatched, val_ds_unbatched, test_ds_unbatched]:
-            #print(ds)
             for i,batch in enumerate(ds):
                 if i < 3:
                     samples.append(batch)
-                    #print(f'{i:04d}', batch.shape)
                 pass
             sizes.append(i+1)
 
@@ -76,7 +81,7 @@ class LfwDataset:
             test_img_sample.append(img.numpy())
 
         test_img_sample = np.stack(test_img_sample, axis=0)
-        print(f'Display test image shape: {test_img_sample.shape}')
+        print(f'lfw.data_sample.shape: {test_img_sample.shape}')
 
         self.data_splits['train'] = train_ds_unbatched
         self.data_splits['val'] = val_ds_unbatched
@@ -84,5 +89,11 @@ class LfwDataset:
         self.data_sample = test_img_sample
         self.base_img_shape = test_img_sample.shape[1:]
     
+    def get_vae_data_splits(self, batch_size):
+        return [
+            self.data_splits['train'].map(lambda x: (x, x)).batch(batch_size),
+            self.data_splits['val'].map(lambda x: (x, x)).batch(batch_size),
+            self.data_splits['test'].map(lambda x: (x, x)).batch(batch_size),
+        ] 
     
     
