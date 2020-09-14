@@ -24,8 +24,10 @@ elif arch_type == 'res_mbconv':
     arch_cells['ar_nn'] = ['']
         
 
+
+Base Conv2D -> [weight_norm, std.conv2d]
+
 # All batch_norms use momentum=0.95 (or 1-0.95=0.05 if in Torch)
-Base Conv2D -> [weight_norm, nn.conv2d]
 (DECODER) ConvBNSwish -> [Conv2D(bias=False, weight_norm=False), batch_norm, swish]
 (ENCODER) BNSwishConv -> [batch_norm, swish, Conv2D(bias=True, weight_norm=True)]
 
@@ -34,6 +36,7 @@ DecCombinerCell(x1,x2) -> Conv2d_1x1(x1 concat x2)
 
 SqueezeExcite -- Standard, use max(c//16, 4) for the squeeze part
 
+# This is used only on the DECODER side
 InvertedResidual ->
     hidden_dim = int(round(Cin * ex))
 
@@ -47,33 +50,27 @@ InvertedResidual ->
 	get_batchnorm(Cout, momentum=0.05)
     ]
 
+# Transforms the original number of channels to the base num channels
 Stem -> Conv2d_3x3  (channels=3 -> num_channels_enc)
 
-
+# ENCODER - Preproc and Residual Cells
 Cell(res_bnswish*2) -> [store_skip_conn, BNSwishConv(3x3, stride), BNSwishConv(3x3, stride), squeeze_excite]
     normal_enc (strides=1)
     normal_pre (strides=1)
     down_enc   (strides=2)
     down_pre   (strides=2)
 
+# DECODER - Residual Cells
 Cell(mconv_e6k5g0) -> [store_skip_conn, InvertedResidual(ex=6, k=5, g=0), squeeze_excite]
     normal_dec (strides=1)
     up_dec     (strides=-1)
 
+# DECODER - Postproc Cells
 Cell(mconv_e3k5g0) -> [store_skip_conn, InvertedResidual(ex=3, k=5, g=0), squeeze_excite]
     normal_post (strides=1)
     up_post     (strides=-1)
     
 
-
-
-AutoEncoder.forward():
-    s = stem(2*x - 1.0)
-
-    for cell in preproc:
-        s = cell(s)
-
-    for cell in enc_tower
 
 
 Assume params:
@@ -106,22 +103,26 @@ encoder_tower:
     scale0 g0 
         Cell(res_bnswish*2)
         Cell(res_bnswish*2)
-        Cell(res_bnswish*2)  Cell(combiner_enc)
+        Cell(res_bnswish*2)
+                Cell(combiner_enc)
     scale0 g1
         Cell(res_bnswish*2)
         Cell(res_bnswish*2)
-        Cell(res_bnswish*2)  Cell(combiner_enc)
+        Cell(res_bnswish*2)
+                Cell(combiner_enc)
 
         Cell(res_bnswish*2, strides=2)
         
     scale1 g0 
         Cell(res_bnswish*2)
         Cell(res_bnswish*2)
-        Cell(res_bnswish*2)  Cell(combiner_enc)
+        Cell(res_bnswish*2)
+                Cell(combiner_enc)
     scale1 g1
         Cell(res_bnswish*2)
         Cell(res_bnswish*2)
-        Cell(res_bnswish*2)  Cell(combiner_enc)
+        Cell(res_bnswish*2)
+                Cell(combiner_enc)
 
         #Cell(res_bnswish*2, strides=2) # omit on the last scale
 
@@ -148,14 +149,16 @@ normal_sampler
 
 decoder_tower:
     scale0 g0 
-    # omit on scale,group=0,0
+    # omit all but combiner for s,g=0,0
         #Cell(ex=6, k=5, g=0)
         #Cell(ex=6, k=5, g=0)
-        #Cell(ex=6, k=5, g=0)  Cell(combiner_dec)
+        #Cell(ex=6, k=5, g=0)
+                Cell(combiner_dec)  # we do use the combiner, with z0/ftr0 as input
     scale0 g1
         Cell(ex=6, k=5, g=0)
         Cell(ex=6, k=5, g=0)
-        Cell(ex=6, k=5, g=0)  Cell(combiner_dec)
+        Cell(ex=6, k=5, g=0)
+                Cell(combiner_dec)
 
         Cell(ex=6, k=5, g=0, strides=-1)
         
@@ -163,11 +166,13 @@ decoder_tower:
     scale1 g0 
         Cell(ex=6, k=5, g=0)
         Cell(ex=6, k=5, g=0)
-        Cell(ex=6, k=5, g=0)  Cell(combiner_dec)
+        Cell(ex=6, k=5, g=0)
+                Cell(combiner_dec)
     scale1 g1
         Cell(ex=6, k=5, g=0)
         Cell(ex=6, k=5, g=0)
-        Cell(ex=6, k=5, g=0)  Cell(combiner_dec)
+        Cell(ex=6, k=5, g=0)
+                Cell(combiner_dec)
 
         #Cell(ex=6, k=5, g=0, strides=-1) # omit on last scale
 
@@ -184,3 +189,42 @@ post_process:
 img_conditional
     ELU()
     Conv2d_3x3(cin=num_channels_enc, cout=3)
+
+
+#####
+# Sampling from the NVLabs code... it's not obvious how to sample without the encoder side inputs
+    def sample(self, num_samples, t):
+        scale_ind = 0
+        z0_size = [num_samples] + self.z0_size
+        dist = Normal(mu=torch.zeros(z0_size).cuda(), log_sigma=torch.zeros(z0_size).cuda(), temp=t)
+        z, _ = dist.sample()
+
+        idx_dec = 0
+        s = self.prior_ftr0.unsqueeze(0)
+        batch_size = z.size(0)
+        s = s.expand(batch_size, -1, -1, -1)
+        for cell in self.dec_tower:
+            if cell.cell_type == 'combiner_dec':
+                if idx_dec > 0:
+                    # form prior
+                    param = self.dec_sampler[idx_dec - 1](s)
+                    mu, log_sigma = torch.chunk(param, 2, dim=1)
+                    dist = Normal(mu, log_sigma, t)
+                    z, _ = dist.sample()
+
+                # 'combiner_dec'
+                s = cell(s, z)
+                idx_dec += 1
+            else:
+                s = cell(s)
+                if cell.cell_type == 'up_dec':
+                    scale_ind += 1
+
+        if self.vanilla_vae:
+            s = self.stem_decoder(z)
+
+        for cell in self.post_process:
+            s = cell(s)
+
+        logits = self.image_conditional(s)
+        return logits

@@ -12,7 +12,17 @@ from nvae_layers import NvaeConv2D
 from nvae_layers import Sampling
 
 class NVAE(tf.keras.Model):
-    def __init__(self, input_shape, base_num_channels, nscales, ngroups, nlatent, *args, **kwargs):
+    def __init__(self,
+                 input_shape,
+                 base_num_channels,
+                 nscales,
+                 ngroups,
+                 ncells,
+                 nlatent,
+                 npreblocks=1,
+                 nprecells=2,
+                 *args,
+                 **kwargs):
         super().__init__(*args, **kwargs)
 
         self.num_scales = nscales
@@ -28,30 +38,123 @@ class NVAE(tf.keras.Model):
 
         sm_scale_factor = 2 ** (self.num_scales - 1)
         assert self.orig_side % sm_scale_factor == 0, f'Image size must be multiple of {sm_scale_factor}'
-        self.smallest_scale = self.orig_side // sm_scale_factor
-        self.largest_num_chan = self.base_num_channels * sm_scale_factor
+        self.peak_side = self.orig_side // sm_scale_factor
+        self.peak_chan = self.base_num_channels * sm_scale_factor
 
         # This is the learnable parameter at the peak between encoder & decoder
-        self.h_peak = self.add_weight(shape=(self.smallest_scale, self.smallest_scale, self.largest_num_chan))
+        self.h_peak = self.add_weight(shape=(self.peak_side, self.peak_side, self.peak_chan))
 
-        self.encoder_blocks = []
-        self.decoder_blocks = []
-        self.decoder_blocks = []
-        # STUB -- going to do the functional version below, first
-        
 
+        self.tower = {}
+
+        self.tower['stem'] = [
+            NvaeConv2D(kernel_size=(3, 3), abs_channels=base_num_channels, name='pre_stem')
+        ]
+
+        self.tower['preproc'] = []
+        for i_pre in range(npreblocks):
+            for i_cell in range(nprecells):
+                last_in_block = (i_cell == nprecells - 1)
+                name = f'pre_blk{i_pre}_c{i_cell}'
+                res_cell = ResidualEncoderCell(downsample=last_in_block, name=name)
+                self.tower['preproc'].append(res_cell)
+
+
+        #####
+        # Encoder Tower -- aggregate combine_samplers after each group.
+        # We treat the top of the tower as (scale, group) == (0, 0), so reverse the loops
+        self.tower['encoder'] = []
+        self.tower['merge_levels'] = {}
+        for s in list(range(nscales))[::-1]:
+            last_scale = (s == 0)
+
+            for g in list(range(ngroups))[::-1]:
+                last_group = (g == 0)
+
+                for c in range(ncells):
+                    name = f'encoder_s{s}_g{g}_c{c}'
+                    self.tower['encoder'].append(ResidualEncoderCell(name=name))
+
+                if last_group:
+                    if not last_scale:
+                        name = f'encoder_s{s}_g{g}_down'
+                        res_cell = ResidualEncoderCell(downsample=True, name=name)
+                        self.tower['encoder'].append(res_cell)
+                        self.tower['merge_levels'].append(MergeCell())
+                    else:
+                        self.tower['merge_levels'].append(MergeCellPeak())
+
+        #####
+        # Encoder0 -- named this way in the NVLabs code
+        x = tf.keras.activations.elu(x)
+        x = NvaeConv2D(kernel_size=(1, 1), scale_channels=2, name='encoder_peak')(x)
+        x = tf.keras.activations.relu(x)
+
+        sample0 = Sampling()(x)
+
+        # Can we use variables within functional models?  Well what we want is just a
+        # h0 = tf.Variable(shape=h0_shape, trainable=True, initial_value=tf.random.normal(h0_shape), name='h_peak')
+        h0 = tf.constant(tf.zeros(shape=h0_shape))
+
+        x = h0 + sample0
+        # x = sample0
+
+        #####
+        # Decoder Tower -- aggregate combine_samplers after each group
+        for s in range(nscales):
+            last_scale = (s == 0)
+
+            for g in range(ngroups):
+                last_group = (g == 0)
+
+                if last_scale and last_group:
+                    continue
+
+                for c in range(ncells):
+                    # last_cell = c == ncells - 1
+                    name = f'decoder_s{s}_g{g}_c{c}'
+                    x = ResidualDecoderCell(name=name)(x)
+
+                # Get the combiner
+                i_merge = s * ngroups + g
+                enc_x = encoder_merge_inputs[i_merge]
+                merge_sampled = CombinerSampler(kl_loss_scalar, name=f'combine_{i_merge}')([enc_x, x])
+                x = merge_sampled + x
+
+                if g == ngroups - 1 and s != nscales - 1:
+                    name = f'decoder_s{s}_g{g}_up'
+                    x = ResidualDecoderCell(upsample=True, name=name)(x)
+                    chan = chan // 2
+                    side = side * 2
+
+        #####
+        # Post-processing
+        for i_post in range(num_prepost_blocks):
+
+            chan = chan * 2
+            side = side // 2
+
+            for i_cell in range(num_prepost_cells):
+                first_cell_in_block = (i_cell == 0)
+                name = f'post_blk{i_pre}_c{i_cell}'
+                x = ResidualDecoderCell(upsample=first_cell_in_block, name=name)(x)
+
+        #####
+        # Tail (opposite stem)
+        x = tf.keras.activations.elu(x)
+        x = outputs = NvaeConv2D(kernel_size=(3, 3), abs_channels=orig_chan, name='tail_stem')(x)
 
 
 def create_nvae(
-    input_shape,
-    base_num_channels,
-    nscales,
-    ngroups,
-    ncells,
-    nlatent,
-    num_prepost_blocks=2,
-    num_prepost_cells=2,
-    kl_loss_scalar=0.001):
+        input_shape,
+        base_num_channels,
+        nscales,
+        ngroups,
+        ncells,
+        nlatent,
+        num_prepost_blocks=2,
+        num_prepost_cells=2,
+        kl_loss_scalar=0.001):
 
     # 
     orig_input_shape = input_shape[-3:]  # initial image shape (W, H, Ch)
@@ -171,7 +274,7 @@ def create_nvae(
     #####
     # Tail (opposite stem)
     x = tf.keras.activations.elu(x)
-    x = outputs = NvaeConv2D(kernel_size=(3, 3), abs_channels=orig_chan, name='tail_stem', activation='relu')(x)
+    x = outputs = NvaeConv2D(kernel_size=(3, 3), abs_channels=orig_chan, name='tail_stem')(x)
     
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     model.h0 = h0

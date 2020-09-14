@@ -14,11 +14,11 @@ class LfwDataset:
     
     @staticmethod
     def scale_and_crop_img(ds_iter):
-        return (tf.cast(ds_iter['image'][45:205, 45:205, :], dtype='float32') / 255.0)
+        return (tf.cast(ds_iter['image'][45:205, 45:205, :], dtype='float32') / 128.0) - 1.0
 
     @staticmethod
     def unscale_img(img):
-        return tf.squeeze(img)
+        return np.clip(tf.squeeze(img / 2.0 + 0.5), 0.0, 1.0)
     
     @staticmethod
     def resample(img, scale):

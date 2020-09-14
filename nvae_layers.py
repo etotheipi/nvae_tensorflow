@@ -413,8 +413,8 @@ class FactorizedDownsample(L.Layer):
 
 class KLDivergence:
     @staticmethod
-    def vs_unit_normal(mu, log_var):
-        return -0.5 * tf.reduce_mean(log_var - tf.square(mu) - tf.exp(log_var) + 1)
+    def vs_unit_normal(mu, logvar):
+        return -0.5 * tf.reduce_mean(logvar - tf.square(mu) - tf.exp(logvar) + 1)
     
     # This would be useful for the residual-normal construct
     @staticmethod
@@ -425,7 +425,7 @@ class KLDivergence:
         return tf.reduce_mean(term1 + term2 - 0.5)
 
     @staticmethod
-    def two_guassians_log_var(mu1, logvar_1, mu2, logvar_2):
+    def two_guassians_logvar(mu1, logvar_1, mu2, logvar_2):
         term1 = 0.5 * (logvar_2 - logvar_1)
         term2 = (tf.exp(logvar_1) + (mu1 - mu2) ** 2) / (2 * tf.exp(logvar_2))
         return tf.reduce_mean(term1 + term2 - 0.5)
@@ -433,12 +433,13 @@ class KLDivergence:
 
 class Sampling(L.Layer):
     """
-    Uses (z_mean, z_log_var) to sample z, the vector encoding a digit.
+    Uses (z_mean, z_logvar) to sample z, the vector encoding a digit.
     """
-    def __init__(self, loss_scalar=1.0, *args, **kwargs):
+    def __init__(self, loss_scalar=1.0, auto_loss=True, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.loss_scalar = loss_scalar
         self.sample_out_shape = None
+        self.auto_loss = auto_loss  # if True, use self.add_loss(kl_term) in call()
 
     def build(self, input_shape):
         #print('Sampling build shape:', input_shape)
@@ -453,19 +454,21 @@ class Sampling(L.Layer):
         
     def call(self, inputs, training=False):
         if isinstance(inputs, (tuple, list)):
-            z_mean, z_log_var = inputs
+            z_mean, z_logvar = inputs
         else:
+            # If it's a single tensor, assume half channels are mu, half are log-var
             z_mean = inputs[:, :, :, self.sample_out_shape[-1]:]
-            z_log_var = inputs[:, :, :, :self.sample_out_shape[-1]]
+            z_logvar = inputs[:, :, :, :self.sample_out_shape[-1]]
 
-        kl_loss = KLDivergence.vs_unit_normal(z_mean, z_log_var)
-        self.add_loss(self.loss_scalar * kl_loss)
+        if self.auto_loss:
+            kl_loss = KLDivergence.vs_unit_normal(z_mean, z_logvar)
+            self.add_loss(self.loss_scalar * kl_loss)
 
         if not training:
             return z_mean
 
-        epsilon = tf.random.normal(shape=tf.shape(z_log_var))
-        return z_mean + tf.exp(0.5 * z_log_var) * epsilon
+        epsilon = tf.random.normal(shape=tf.shape(z_logvar))
+        return z_mean + tf.exp(0.5 * z_logvar) * epsilon
 
     def compute_output_shape(self, input_shape):
         return self.sample_out_shape
@@ -478,18 +481,19 @@ class Sampling(L.Layer):
         return cfg
 
 
-
+''' NOTE: This may not be relevant anymore, written before I fully understood the merge levels
 class CombinerSampler(L.Layer):
-    """
-    We initialize with the output of the encoder side, which is created before 
-    """
     def __init__(self, kl_loss_scalar=1.0, *args,  **kwargs):
         super().__init__(*args, **kwargs)
         self.kl_loss_scalar = kl_loss_scalar
-        
+        self.base_num_channels = None
+        self.conv_left = None
+        self.conv_right = None
+        self.conv_concat = None
+        self.sampling = None
+
     def build(self, input_shape):
         left_shape, right_shape = input_shape
-        #print('CombSample build shape:', input_shape)
         assert list(left_shape) == list(right_shape), f'Inputs to combiner cell are not the same {left_shape} != {right_shape}'
         self.base_num_channels = left_shape[-1]
         
@@ -510,6 +514,81 @@ class CombinerSampler(L.Layer):
         out_logvar = out2x[:, :, :, self.base_num_channels:]
         
         return self.sampling([out_mu, out_logvar], training=training)
-        
-        
-        
+'''
+
+
+class MergeLevelCellPeak(L.Layer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.conv_out = None
+
+    def build(self, input_shape):
+        left_shape, right_shape = input_shape
+        assert list(left_shape) == list(right_shape), f'Left={left_shape} != Right={right_shape}'
+
+        # Concatenation of inputs will double the channels, scale=-2 to get it back down
+        self.conv_out = NvaeConv2D(kernel_size=(1, 1), scale_channels=-2)
+
+    def call(self, input_pair, training=False):
+        z0_left, ftr0_right = input_pair
+
+        merge = L.Concatenate(axis=-1)([z0_left, ftr0_right])
+        return self.conv_out(merge, training=training)
+
+
+class MergeLevelCell(L.Layer):
+    """
+    We initialize with the output of the encoder side, which is created before
+    """
+
+    def __init__(self, num_latent, kl_loss_scalar=0.001, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_latent = num_latent
+        self.kl_loss_scalar = kl_loss_scalar
+
+    def build(self, input_shape):
+        s_enc_shape, s_dec_shape = input_shape
+        self.orig_chan = s_enc_shape[-1]
+
+        # print('CombSample build shape:', input_shape)
+        assert list(s_enc_shape) == list(s_dec_shape), f's_enc:{s_enc_shape} != s_dec:{s_dec_shape}'
+        self.conv_enc_0 = NvaeConv2D(kernel_size=(1, 1))
+        self.conv_enc_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
+        self.sampling_enc = Sampling(auto_loss=False)
+
+        # Operates on concatenated inputs, so get it back to original shape
+        self.conv_dec_0 = NvaeConv2D(kernel_size=(1, 1), abs_channels=s_dec_shape[-1])
+        self.conv_dec_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
+        self.sampling_dec = Sampling(auto_loss=False)
+
+    def call(self, s_enc_dec_pair, training=False):
+        s_enc, s_dec = s_enc_dec_pair
+        if training:
+            ftr = s_enc + self.conv_enc_0(s_dec)
+            params_q = self.conv_enc_1(ftr)
+            mu_q = params_q[:, :, :, self.orig_chan:]
+            logvar_q = params_q[:, :, :, :self.orig_chan]
+
+            z = self.sampling_enc([mu_q, logvar_q])
+            s_out = self.conv_dec_0(L.Concatenate(axis=-1)([z, s_dec]))
+
+            # Before returning, we need to compute the DecoderSampler and KL terms
+            s_dec = tf.keras.activations.elu(s_dec)
+            params_p = self.conv_dec_1(s_dec)
+            mu_p = params_p[:, :, :, self.orig_chan:]
+            logvar_p = params_p[:, :, :, :self.orig_chan]
+
+            kl_term = KLDivergence.two_guassians_logvar(mu_q, logvar_p, mu_p, logvar_p)
+            self.add_loss(self.kl_loss_scalar * kl_term)
+
+            return s_out
+        else:
+            x = tf.keras.activations.elu(s_dec)
+            params_p = self.conv_dec_1(x)
+            mu_p = params_p[:, :, :, self.orig_chan:]
+            logvar_p = params_p[:, :, :, :self.orig_chan]
+            z = self.sampling_dec([mu_p, logvar_p])
+            s_out = self.conv_dec_0(L.Concatenate(axis=-1)([z, s_dec]))
+            return s_out
+
+
