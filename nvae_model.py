@@ -95,7 +95,7 @@ class NVAE(tf.keras.Model):
 
         # Can we use variables within functional models?  Well what we want is just a
         # h0 = tf.Variable(shape=h0_shape, trainable=True, initial_value=tf.random.normal(h0_shape), name='h_peak')
-        h0 = tf.constant(tf.zeros(shape=h0_shape))
+        h0 = tf.constant(tf.zeros(shape=h0_shape), name='h_peak')
 
         x = h0 + sample0
         # x = sample0
@@ -168,7 +168,6 @@ def create_nvae(
     h0_side = orig_side // sm_scale_factor
     h0_chan = base_num_channels * sm_scale_factor
     h0_shape = (h0_side, h0_side, h0_chan)
-    h_peak = L.Input(shape=h0_shape)
 
     merge_enc_left_side = {}
 
@@ -231,7 +230,7 @@ def create_nvae(
             last_group_in_scale = (g == ngroups - 1)
             
             if top_group_in_scale and peak_scale:
-                x = MergeCellPeak(nlatent, name='merge0')([s_enc_peak, h_peak])
+                x = MergeCellPeak(nlatent, peak_shape=h0_shape)(s_enc_peak)
             else:
                 i_merge = s*ngroups + g
                 s_enc = merge_enc_left_side[i_merge]
@@ -267,7 +266,7 @@ def create_nvae(
     x = tf.keras.activations.elu(x)
     x = outputs = NvaeConv2D(kernel_size=(3, 3), abs_channels=orig_chan, name='tail_stem')(x)
     
-    model = tf.keras.Model(inputs=[enc_input, h_peak], outputs=outputs)
+    model = tf.keras.Model(inputs=enc_input, outputs=outputs)
     
     return model
     

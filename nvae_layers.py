@@ -481,48 +481,45 @@ class Sampling(L.Layer):
         return cfg
 
 
-
 class MergeCellPeak(L.Layer):
     """
-    The peak merge cell is a bit different than the rest, taking the trainable
-    param at the peak and the z0 sample as inputs.  
+    The peak merge cell is a bit different than the rest, tracking the trainable
+    param at the peak and takes either peak encoder output alone, or a random sample
     """
-    def __init__(self, num_latent, kl_loss_scalar=1.0, *args, **kwargs):
+    def __init__(self, num_latent, peak_shape, kl_loss_scalar=1.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_latent = num_latent
         self.kl_loss_scalar = kl_loss_scalar
-        self.orig_shape = None
-        self.encoder0 = None
-        self.conv_enc_1 = None
-        self.sampling_enc = None
-        self.conv_dec_0 = None
+        self.shape0 = peak_shape
         self.generate = False
 
-    def build(self, input_shape):
-        left_shape, right_shape = input_shape
-        assert list(left_shape) == list(right_shape), f'Left={left_shape} != Right={right_shape}'
-        self.orig_shape = right_shape
+        if len(self.shape0) == 3:
+            self.shape0 = (1,) + self.shape0
+            
+        print(self.shape0)
+        self.h0 = self.add_weight(shape=self.shape0,
+                                  dtype='float32',
+                                  initializer=tf.random_normal_initializer,
+                                  trainable=True)
+        
         self.encoder0 = NvaeConv2D(kernel_size=(1, 1))
         self.conv_enc_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
         self.sampling_enc = Sampling(auto_loss=False)
-        self.conv_dec_0 = NvaeConv2D(kernel_size=(1, 1), abs_channels=self.orig_shape[-1])
+        self.conv_dec_0 = NvaeConv2D(kernel_size=(1, 1), abs_channels=self.shape0[-1])
 
     def set_generate_mode(self, generative=True):
         self.generate = generative
 
-    def call(self, input_pair, training=False):
+    def call(self, s_enc, training=False):
         if self.generate:
             assert not training, 'Cannot generate in training mode!'
-            _, ftr0 = input_pair
-            side = self.orig_shape[-3]
+            side = self.shape0[-3]
             z = tf.random.normal((side, side, self.num_latent))
             # Need to set these for loss calc later, even though not in training mode
             mu_q = tf.zeros_like(z)
             logvar_q = tf.zeros_like(z)
         else:
             # With encoder
-            s_enc, ftr0 = input_pair
-
             s_enc = tf.keras.activations.elu(s_enc)
             s_enc = self.encoder0(s_enc, training=training)
             s_enc = tf.keras.activations.elu(s_enc)
@@ -533,9 +530,9 @@ class MergeCellPeak(L.Layer):
             z = self.sampling_enc([mu_q, logvar_q], training=training)
             
             batch_size = tf.shape(s_enc)[0]
-            ftr0 = tf.tile(ftr0, [batch_size, 1, 1, 1])
+            h0_tiled = tf.tile(self.h0, [batch_size, 1, 1, 1])
 
-        merge = L.Concatenate(axis=-1)([z, ftr0])
+        merge = L.Concatenate(axis=-1)([z, h0_tiled])
         s_out = self.conv_dec_0(merge, training=training)
 
         # KL-divergence of q(z|x) against N(0,1)
