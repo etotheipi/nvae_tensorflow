@@ -445,7 +445,7 @@ class Sampling(L.Layer):
         #print('Sampling build shape:', input_shape)
         if isinstance(input_shape, (tuple, list)):
             shape1, shape2 = input_shape
-            assert list(shape1) == list(shape2), 'Inputs to Sampling layer'
+            assert list(shape1) == list(shape2), f'Sample input mismatch: {shape1} != {shape2}'
         else:
             # One tensor passed in, needs to be split into two:
             shape1 = input_shape[:-1] + (input_shape[-1] // 2,)
@@ -481,62 +481,71 @@ class Sampling(L.Layer):
         return cfg
 
 
-''' NOTE: This may not be relevant anymore, written before I fully understood the merge levels
-class CombinerSampler(L.Layer):
-    def __init__(self, kl_loss_scalar=1.0, *args,  **kwargs):
+
+class MergeCellPeak(L.Layer):
+    """
+    The peak merge cell is a bit different than the rest, taking the trainable
+    param at the peak and the z0 sample as inputs.  
+    """
+    def __init__(self, num_latent, kl_loss_scalar=1.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.num_latent = num_latent
         self.kl_loss_scalar = kl_loss_scalar
-        self.base_num_channels = None
-        self.conv_left = None
-        self.conv_right = None
-        self.conv_concat = None
-        self.sampling = None
-
-    def build(self, input_shape):
-        left_shape, right_shape = input_shape
-        assert list(left_shape) == list(right_shape), f'Inputs to combiner cell are not the same {left_shape} != {right_shape}'
-        self.base_num_channels = left_shape[-1]
-        
-        self.conv_left = NvaeConv2D(kernel_size=(1, 1), activation='relu')
-        self.conv_right = NvaeConv2D(kernel_size=(1, 1), activation='relu')
-        self.conv_concat = NvaeConv2D(kernel_size=(1, 1), activation='relu')
-        self.sampling = Sampling(loss_scalar=self.kl_loss_scalar)
-        
-    def call(self, enc_dec_pair, training=False):
-        left, right = enc_dec_pair
-        
-        left = self.conv_left(left, training=training)
-        right = self.conv_right(right, training=training)
-        merge = L.Concatenate(axis=-1)([left, right])
-        out2x = self.conv_concat(merge, training=training)
-        
-        out_mu = out2x[:, :, :, :self.base_num_channels]
-        out_logvar = out2x[:, :, :, self.base_num_channels:]
-        
-        return self.sampling([out_mu, out_logvar], training=training)
-'''
-
-
-class MergeLevelCellPeak(L.Layer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.conv_out = None
+        self.orig_shape = None
+        self.encoder0 = None
+        self.conv_enc_1 = None
+        self.sampling_enc = None
+        self.conv_dec_0 = None
+        self.generate = False
 
     def build(self, input_shape):
         left_shape, right_shape = input_shape
         assert list(left_shape) == list(right_shape), f'Left={left_shape} != Right={right_shape}'
+        self.orig_shape = right_shape
+        self.encoder0 = NvaeConv2D(kernel_size=(1, 1))
+        self.conv_enc_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
+        self.sampling_enc = Sampling(auto_loss=False)
+        self.conv_dec_0 = NvaeConv2D(kernel_size=(1, 1), abs_channels=self.orig_shape[-1])
 
-        # Concatenation of inputs will double the channels, scale=-2 to get it back down
-        self.conv_out = NvaeConv2D(kernel_size=(1, 1), scale_channels=-2)
+    def set_generate_mode(self, generative=True):
+        self.generate = generative
 
     def call(self, input_pair, training=False):
-        z0_left, ftr0_right = input_pair
+        if self.generate:
+            assert not training, 'Cannot generate in training mode!'
+            _, ftr0 = input_pair
+            side = self.orig_shape[-3]
+            z = tf.random.normal((side, side, self.num_latent))
+            # Need to set these for loss calc later, even though not in training mode
+            mu_q = tf.zeros_like(z)
+            logvar_q = tf.zeros_like(z)
+        else:
+            # With encoder
+            s_enc, ftr0 = input_pair
 
-        merge = L.Concatenate(axis=-1)([z0_left, ftr0_right])
-        return self.conv_out(merge, training=training)
+            s_enc = tf.keras.activations.elu(s_enc)
+            s_enc = self.encoder0(s_enc, training=training)
+            s_enc = tf.keras.activations.elu(s_enc)
+
+            params_q = self.conv_enc_1(s_enc, training=training)
+            mu_q = params_q[:, :, :, self.num_latent:]
+            logvar_q = params_q[:, :, :, :self.num_latent]
+            z = self.sampling_enc([mu_q, logvar_q], training=training)
+            
+            batch_size = tf.shape(s_enc)[0]
+            ftr0 = tf.tile(ftr0, [batch_size, 1, 1, 1])
+
+        merge = L.Concatenate(axis=-1)([z, ftr0])
+        s_out = self.conv_dec_0(merge, training=training)
+
+        # KL-divergence of q(z|x) against N(0,1)
+        kl_term = KLDivergence.vs_unit_normal(mu_q, logvar_q)
+        self.add_loss(self.kl_loss_scalar * kl_term)
+
+        return s_out
 
 
-class MergeLevelCell(L.Layer):
+class MergeCell(L.Layer):
     """
     We initialize with the output of the encoder side, which is created before
     """
@@ -545,6 +554,14 @@ class MergeLevelCell(L.Layer):
         super().__init__(*args, **kwargs)
         self.num_latent = num_latent
         self.kl_loss_scalar = kl_loss_scalar
+        self.orig_chan = None
+        self.conv_enc_0 = None
+        self.conv_enc_1 = None
+        self.sampling_enc = None
+        self.conv_dec_0 = None
+        self.conv_dec_1 = None
+        self.sampling_dec = None
+        self.generate = False
 
     def build(self, input_shape):
         s_enc_shape, s_dec_shape = input_shape
@@ -554,41 +571,48 @@ class MergeLevelCell(L.Layer):
         assert list(s_enc_shape) == list(s_dec_shape), f's_enc:{s_enc_shape} != s_dec:{s_dec_shape}'
         self.conv_enc_0 = NvaeConv2D(kernel_size=(1, 1))
         self.conv_enc_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
-        self.sampling_enc = Sampling(auto_loss=False)
 
-        # Operates on concatenated inputs, so get it back to original shape
-        self.conv_dec_0 = NvaeConv2D(kernel_size=(1, 1), abs_channels=s_dec_shape[-1])
+        self.conv_dec_0 = NvaeConv2D(kernel_size=(1, 1), abs_channels=self.orig_chan)
         self.conv_dec_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
+
+        self.sampling_enc = Sampling(auto_loss=False)
         self.sampling_dec = Sampling(auto_loss=False)
 
-    def call(self, s_enc_dec_pair, training=False):
-        s_enc, s_dec = s_enc_dec_pair
-        if training:
-            ftr = s_enc + self.conv_enc_0(s_dec)
-            params_q = self.conv_enc_1(ftr)
-            mu_q = params_q[:, :, :, self.orig_chan:]
-            logvar_q = params_q[:, :, :, :self.orig_chan]
+    def set_generate_mode(self, generative=True):
+        self.generate = generative
 
-            z = self.sampling_enc([mu_q, logvar_q])
-            s_out = self.conv_dec_0(L.Concatenate(axis=-1)([z, s_dec]))
+    def call(self, s_enc_dec_pair, training=False):
+        if self.generate:
+            assert not training, 'Cannot generate in training mode!'
+            _, s_dec = s_enc_dec_pair
+            print('Generate mode')
+            x = tf.keras.activations.elu(s_dec)
+            params_p = self.conv_dec_1(x, training=training)
+            mu_p = params_p[:, :, :, self.num_latent:]
+            logvar_p = params_p[:, :, :, :self.num_latent]
+            z = self.sampling_dec([mu_p, logvar_p], training=training)
+            s_out = self.conv_dec_0(L.Concatenate(axis=-1)([z, s_dec]), training=training)
+        else:
+            # With encoder
+            s_enc, s_dec = s_enc_dec_pair
+            ftr = s_enc + self.conv_enc_0(s_dec, training=training)
+            params_q = self.conv_enc_1(ftr, training=training)
+            mu_q = params_q[:, :, :, self.num_latent:]
+            logvar_q = params_q[:, :, :, :self.num_latent]
+
+            z = self.sampling_enc([mu_q, logvar_q], training=training)
+            s_out = self.conv_dec_0(L.Concatenate(axis=-1)([z, s_dec]), training=training)
 
             # Before returning, we need to compute the DecoderSampler and KL terms
             s_dec = tf.keras.activations.elu(s_dec)
-            params_p = self.conv_dec_1(s_dec)
-            mu_p = params_p[:, :, :, self.orig_chan:]
-            logvar_p = params_p[:, :, :, :self.orig_chan]
+            params_p = self.conv_dec_1(s_dec, training=training)
+            mu_p = params_p[:, :, :, self.num_latent:]
+            logvar_p = params_p[:, :, :, :self.num_latent]
 
-            kl_term = KLDivergence.two_guassians_logvar(mu_q, logvar_p, mu_p, logvar_p)
+            # KL-divergence of q(z|x) against p(z|x) estimate
+            kl_term = KLDivergence.two_guassians_logvar(mu_q, logvar_q, mu_p, logvar_p)
             self.add_loss(self.kl_loss_scalar * kl_term)
 
-            return s_out
-        else:
-            x = tf.keras.activations.elu(s_dec)
-            params_p = self.conv_dec_1(x)
-            mu_p = params_p[:, :, :, self.orig_chan:]
-            logvar_p = params_p[:, :, :, :self.orig_chan]
-            z = self.sampling_dec([mu_p, logvar_p])
-            s_out = self.conv_dec_0(L.Concatenate(axis=-1)([z, s_dec]))
-            return s_out
+        return s_out
 
 

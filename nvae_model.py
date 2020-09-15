@@ -7,7 +7,8 @@ from nvae_layers import SqueezeExciteLayer
 from nvae_layers import FactorizedDownsample
 from nvae_layers import ResidualDecoderCell
 from nvae_layers import ResidualEncoderCell
-from nvae_layers import CombinerSampler
+from nvae_layers import MergeCellPeak
+from nvae_layers import MergeCell
 from nvae_layers import NvaeConv2D
 from nvae_layers import Sampling
 
@@ -66,23 +67,23 @@ class NVAE(tf.keras.Model):
         self.tower['encoder'] = []
         self.tower['merge_levels'] = {}
         for s in list(range(nscales))[::-1]:
-            last_scale = (s == 0)
+            peak_scale = (s == 0)
 
             for g in list(range(ngroups))[::-1]:
-                last_group = (g == 0)
+                top_group_in_scale = (g == 0)
 
                 for c in range(ncells):
                     name = f'encoder_s{s}_g{g}_c{c}'
                     self.tower['encoder'].append(ResidualEncoderCell(name=name))
 
-                if last_group:
-                    if not last_scale:
-                        name = f'encoder_s{s}_g{g}_down'
-                        res_cell = ResidualEncoderCell(downsample=True, name=name)
-                        self.tower['encoder'].append(res_cell)
-                        self.tower['merge_levels'].append(MergeCell())
+                if top_group_in_scale:
+                    if not peak_scale:
+                        self.tower['merge_levels'][s*ngroups+g] = MergeCellPeak()
                     else:
-                        self.tower['merge_levels'].append(MergeCellPeak())
+                        name = f'encoder_s{s}_g{g}_down'
+                        res_down_cell = ResidualEncoderCell(downsample=True, name=name)
+                        self.tower['encoder'].append(res_down_cell)
+                        self.tower['merge_levels'][s*ngroups+g] = MergeCell()
 
         #####
         # Encoder0 -- named this way in the NVLabs code
@@ -102,12 +103,12 @@ class NVAE(tf.keras.Model):
         #####
         # Decoder Tower -- aggregate combine_samplers after each group
         for s in range(nscales):
-            last_scale = (s == 0)
+            peak_scale = (s == 0)
 
             for g in range(ngroups):
-                last_group = (g == 0)
+                top_group_in_scale = (g == 0)
 
-                if last_scale and last_group:
+                if peak_scale and top_group_in_scale:
                     continue
 
                 for c in range(ncells):
@@ -117,7 +118,7 @@ class NVAE(tf.keras.Model):
 
                 # Get the combiner
                 i_merge = s * ngroups + g
-                enc_x = encoder_merge_inputs[i_merge]
+                enc_x = merge_enc_left_side[i_merge]
                 merge_sampled = CombinerSampler(kl_loss_scalar, name=f'combine_{i_merge}')([enc_x, x])
                 x = merge_sampled + x
 
@@ -166,12 +167,13 @@ def create_nvae(
     assert orig_side % sm_scale_factor == 0, f"Original image size must be multiple of {sm_scale_factor}"
     h0_side = orig_side // sm_scale_factor
     h0_chan = base_num_channels * sm_scale_factor
-    h0_shape = (1, h0_side, h0_side, h0_chan)
+    h0_shape = (h0_side, h0_side, h0_chan)
+    h_peak = L.Input(shape=h0_shape)
 
-    encoder_merge_inputs = {}
+    merge_enc_left_side = {}
 
     # Let's get this party started
-    x = inputs = L.Input(input_shape)
+    x = enc_input = L.Input(input_shape)
 
     #####
     # Stem -- Expand from 3 channels to num_channels_enc
@@ -192,10 +194,10 @@ def create_nvae(
     # Encoder Tower -- aggregate combine_samplers after each group. 
     # We treat the top of the tower as (scale, group) == (0, 0), so reverse the loops
     for s in list(range(nscales))[::-1]:
-        last_scale = (s == 0)
+        peak_scale = (s == 0)
         
         for g in list(range(ngroups))[::-1]:
-            last_group = (g == 0)
+            top_group_in_scale = (g == 0)
             
             for c in range(ncells):
                 #last_cell = (c == ncells - 1)
@@ -204,54 +206,43 @@ def create_nvae(
                 x = ResidualEncoderCell(name=name)(x)
 
             # The last encoder output gets combined with h0
-            if not (last_group and last_scale):
-                encoder_merge_inputs[s*ngroups + g] = x
+            if not (top_group_in_scale and peak_scale):
+                merge_enc_left_side[s*ngroups + g] = x
                     
-            if last_group and not last_scale:
+            if top_group_in_scale and not peak_scale:
                 name = f'encoder_s{s}_g{g}_down'
                 x = ResidualEncoderCell(downsample=True, name=name)(x)
                 chan = chan * 2
                 side = side // 2
     
-
-    #####
-    # Encoder0 -- named this way in the NVLabs code
-    x = tf.keras.activations.elu(x)
-    x = NvaeConv2D(kernel_size=(1, 1), scale_channels=2, name='encoder_peak')(x)
-    x = tf.keras.activations.relu(x)
-    
-    sample0 = Sampling()(x)
-    
     # Can we use variables within functional models?  Well what we want is just a 
     #h0 = tf.Variable(shape=h0_shape, trainable=True, initial_value=tf.random.normal(h0_shape), name='h_peak')
-    h0 = tf.constant(tf.zeros(shape=h0_shape))
-
-    x = h0 + sample0
-    #x = sample0
+    s_enc_peak = x
+    #h0 = tf.constant(tf.zeros(shape=h0_shape))
     
     #####
     # Decoder Tower -- aggregate combine_samplers after each group
     for s in range(nscales):
-        last_scale = (s == 0)
+        peak_scale = (s == 0)
+        bottom_scale = (s == nscales - 1)
         
         for g in range(ngroups):
-            last_group = (g == 0)
+            top_group_in_scale = (g == 0)
+            last_group_in_scale = (g == ngroups - 1)
             
-            if last_scale and last_group:
-                continue
-            
+            if top_group_in_scale and peak_scale:
+                x = MergeCellPeak(nlatent, name='merge0')([s_enc_peak, h_peak])
+            else:
+                i_merge = s*ngroups + g
+                s_enc = merge_enc_left_side[i_merge]
+                name = f'merge_s{s}_g{g}'                                              
+                x = MergeCell(nlatent, name=name)([s_enc, x])
+                                                                  
             for c in range(ncells):
-                #last_cell = c == ncells - 1
                 name = f'decoder_s{s}_g{g}_c{c}'
                 x = ResidualDecoderCell(name=name)(x)
-                
-            # Get the combiner
-            i_merge = s*ngroups + g
-            enc_x = encoder_merge_inputs[i_merge]
-            merge_sampled = CombinerSampler(kl_loss_scalar, name=f'combine_{i_merge}')([enc_x, x])
-            x = merge_sampled + x
                     
-            if g == ngroups - 1 and s != nscales - 1:
+            if last_group_in_scale and not bottom_scale:
                 name = f'decoder_s{s}_g{g}_up'
                 x = ResidualDecoderCell(upsample=True, name=name)(x)
                 chan = chan // 2
@@ -276,8 +267,7 @@ def create_nvae(
     x = tf.keras.activations.elu(x)
     x = outputs = NvaeConv2D(kernel_size=(3, 3), abs_channels=orig_chan, name='tail_stem')(x)
     
-    model = tf.keras.Model(inputs=inputs, outputs=outputs)
-    model.h0 = h0
+    model = tf.keras.Model(inputs=[enc_input, h_peak], outputs=outputs)
     
     return model
     
