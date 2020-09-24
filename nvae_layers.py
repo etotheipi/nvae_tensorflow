@@ -440,6 +440,8 @@ class Sampling(L.Layer):
         self.loss_scalar = loss_scalar
         self.sample_out_shape = None
         self.auto_loss = auto_loss  # if True, use self.add_loss(kl_term) in call()
+        self.temperature = 1.0
+        self.generate = False
 
     def build(self, input_shape):
         #print('Sampling build shape:', input_shape)
@@ -451,6 +453,13 @@ class Sampling(L.Layer):
             shape1 = input_shape[:-1] + (input_shape[-1] // 2,)
 
         self.sample_out_shape = shape1
+        
+    def set_temperature(self, new_temp):
+        self.temperature = new_temp
+        
+    def set_generate_mode(self, generative=True):
+        print('(SAMPLE) Sampling mode set generate', generative)
+        self.generate = generative
         
     def call(self, inputs, training=False):
         if isinstance(inputs, (tuple, list)):
@@ -464,11 +473,17 @@ class Sampling(L.Layer):
             kl_loss = KLDivergence.vs_unit_normal(z_mean, z_logvar)
             self.add_loss(self.loss_scalar * kl_loss)
 
-        if not training:
+        # Need to figure out when this should be used
+        #print(training, self.generate)
+        if not training or not self.generate:
             return z_mean
 
         epsilon = tf.random.normal(shape=tf.shape(z_logvar))
-        return z_mean + tf.exp(0.5 * z_logvar) * epsilon
+        
+        if self.temperature != 1.0:
+            print('Using temp:', self.temperature)
+            
+        return z_mean + tf.exp(0.5 * z_logvar) * epsilon * self.temperature
 
     def compute_output_shape(self, input_shape):
         return self.sample_out_shape
@@ -486,7 +501,7 @@ class MergeCellPeak(L.Layer):
     The peak merge cell is a bit different than the rest, tracking the trainable
     param at the peak and takes either peak encoder output alone, or a random sample
     """
-    def __init__(self, num_latent, peak_shape, kl_loss_scalar=1.0, *args, **kwargs):
+    def __init__(self, num_latent, peak_shape, kl_loss_scalar=0.2, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_latent = num_latent
         self.kl_loss_scalar = kl_loss_scalar
@@ -496,7 +511,6 @@ class MergeCellPeak(L.Layer):
         if len(self.shape0) == 3:
             self.shape0 = (1,) + self.shape0
             
-        print(self.shape0)
         self.h0 = self.add_weight(shape=self.shape0,
                                   dtype='float32',
                                   initializer=tf.random_normal_initializer,
@@ -508,13 +522,18 @@ class MergeCellPeak(L.Layer):
         self.conv_dec_0 = NvaeConv2D(kernel_size=(1, 1), abs_channels=self.shape0[-1])
 
     def set_generate_mode(self, generative=True):
+        print('(PEAK) Sampling mode set generate', generative)
         self.generate = generative
+        self.sampling_dec.set_generate(generative)
+        self.sampling_enc.set_generate(generative)
 
     def call(self, s_enc, training=False):
+        batch_size = tf.shape(s_enc)[0]
         if self.generate:
             assert not training, 'Cannot generate in training mode!'
+            print('Generate mode')
             side = self.shape0[-3]
-            z = tf.random.normal((side, side, self.num_latent))
+            z = tf.random.normal((batch_size, side, side, self.num_latent))
             # Need to set these for loss calc later, even though not in training mode
             mu_q = tf.zeros_like(z)
             logvar_q = tf.zeros_like(z)
@@ -529,8 +548,7 @@ class MergeCellPeak(L.Layer):
             logvar_q = params_q[:, :, :, :self.num_latent]
             z = self.sampling_enc([mu_q, logvar_q], training=training)
             
-            batch_size = tf.shape(s_enc)[0]
-            h0_tiled = tf.tile(self.h0, [batch_size, 1, 1, 1])
+        h0_tiled = tf.tile(self.h0, [batch_size, 1, 1, 1])
 
         merge = L.Concatenate(axis=-1)([z, h0_tiled])
         s_out = self.conv_dec_0(merge, training=training)
@@ -547,7 +565,7 @@ class MergeCell(L.Layer):
     We initialize with the output of the encoder side, which is created before
     """
 
-    def __init__(self, num_latent, kl_loss_scalar=0.001, *args, **kwargs):
+    def __init__(self, num_latent, kl_loss_scalar=0.2, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_latent = num_latent
         self.kl_loss_scalar = kl_loss_scalar
@@ -559,6 +577,7 @@ class MergeCell(L.Layer):
         self.conv_dec_1 = None
         self.sampling_dec = None
         self.generate = False
+        print(f'kl_loss_scalar={kl_loss_scalar}')
 
     def build(self, input_shape):
         s_enc_shape, s_dec_shape = input_shape
@@ -576,13 +595,19 @@ class MergeCell(L.Layer):
         self.sampling_dec = Sampling(auto_loss=False)
 
     def set_generate_mode(self, generative=True):
+        print('(REG) Sampling mode set generate', generative)
         self.generate = generative
+        self.sampling_dec.set_generate(generative)
+        self.sampling_enc.set_generate(generative)
+
+    def set_temperature(self, new_temp):
+        self.sampling_dec.set_temperature(new_temp)
+        self.sampling_enc.set_temperature(new_temp)
 
     def call(self, s_enc_dec_pair, training=False):
         if self.generate:
             assert not training, 'Cannot generate in training mode!'
             _, s_dec = s_enc_dec_pair
-            print('Generate mode')
             x = tf.keras.activations.elu(s_dec)
             params_p = self.conv_dec_1(x, training=training)
             mu_p = params_p[:, :, :, self.num_latent:]

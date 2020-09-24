@@ -92,9 +92,6 @@ class NVAE(tf.keras.Model):
         x = tf.keras.activations.relu(x)
 
         sample0 = Sampling()(x)
-
-        # Can we use variables within functional models?  Well what we want is just a
-        # h0 = tf.Variable(shape=h0_shape, trainable=True, initial_value=tf.random.normal(h0_shape), name='h_peak')
         h0 = tf.constant(tf.zeros(shape=h0_shape), name='h_peak')
 
         x = h0 + sample0
@@ -257,7 +254,7 @@ def create_nvae(
         
         for i_cell in range(num_prepost_cells):
             first_cell_in_block = (i_cell == 0)
-            name = f'post_blk{i_pre}_c{i_cell}'
+            name = f'post_blk{i_post}_c{i_cell}'
             x = ResidualDecoderCell(upsample=first_cell_in_block, name=name)(x)
             
             

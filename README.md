@@ -1,10 +1,22 @@
-## Tensorflow implementation of NVAE:  A Deep Hierarchical Variational Autoencoder
+### (WIP) Tensorflow implementation of *NVAE:  A Deep Hierarchical Variational Autoencoder*
 
-My best shot at implementing the NVAE paper publish 8 July, 2020: https://arxiv.org/abs/2007.03898
+**WORK IN PROGRESS**
+
+Implementation of the NVAE paper publish 8 July, 2020: https://arxiv.org/abs/2007.03898
+
+Features and Limitations:
+* ✓ Written in Tensorflow 2.3, Python 3.8.2
+* ✓ Dynamic multi-scale, multi-group, multi-cell architecture ✓
+* ✓ Spectral Normalization via tensorflow_addons ✓
+* ✗ Residual normal distribution (not implemented) ✗ 
+* ✗ Normalizing flows (not implemented) ✗ 
+
 
 ### Reconstruction of 64x64 face images passing through NVAE
-(I haven't gotten around yet to implementing the sampling to generate new faces)
 ![](images/nvae_roundtrip_samples.png)
+
+### Generation of 64x64 face images 
+![](images/nvae_gen_random.png)
 
 This was created with a tiny version of the NVAE architecture
 * num_scales=2
@@ -17,4 +29,8 @@ This was created with a tiny version of the NVAE architecture
 
 ![](images/small_nvae.png)
 
+
+### Residual Cells
+
+![](images/nvae_residual_cell_diagram.png)
 

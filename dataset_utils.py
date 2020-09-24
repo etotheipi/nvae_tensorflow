@@ -4,10 +4,11 @@ import tensorflow_datasets as tfds
 
 
 class LfwDataset:
-    def __init__(self):
+    def __init__(self, shuffle_count=1000):
         self.data_splits = {}
         self.data_sample = None
         self.base_img_shape = None
+        self.shuffle_count = shuffle_count
         
     def get_base_img_shape(self):
         return self.base_img_shape
@@ -52,7 +53,8 @@ class LfwDataset:
             
         sizes = []
 
-        train_ds_unbatched = train_ds_unbatched.map(LfwDataset.scale_and_crop_img).shuffle(1000)
+        shuf = self.shuffle_count
+        train_ds_unbatched = train_ds_unbatched.map(LfwDataset.scale_and_crop_img).shuffle(shuf)
         val_ds_unbatched = val_ds_unbatched.map(LfwDataset.scale_and_crop_img)
         test_ds_unbatched = test_ds_unbatched.map(LfwDataset.scale_and_crop_img)
         
