@@ -524,7 +524,6 @@ class MergeCellPeak(L.Layer):
     def set_generate_mode(self, generative=True):
         print('(PEAK) Sampling mode set generate', generative)
         self.generate = generative
-        self.sampling_dec.set_generate(generative)
         self.sampling_enc.set_generate(generative)
 
     def call(self, s_enc, training=False):
@@ -565,7 +564,7 @@ class MergeCell(L.Layer):
     We initialize with the output of the encoder side, which is created before
     """
 
-    def __init__(self, num_latent, kl_loss_scalar=0.2, *args, **kwargs):
+    def __init__(self, num_latent, kl_loss_scalar=0.2, res_dist=True, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_latent = num_latent
         self.kl_loss_scalar = kl_loss_scalar
@@ -577,6 +576,7 @@ class MergeCell(L.Layer):
         self.conv_dec_1 = None
         self.sampling_dec = None
         self.generate = False
+        self.res_dist = res_dist
         print(f'kl_loss_scalar={kl_loss_scalar}')
 
     def build(self, input_shape):
@@ -631,9 +631,14 @@ class MergeCell(L.Layer):
             mu_p = params_p[:, :, :, self.num_latent:]
             logvar_p = params_p[:, :, :, :self.num_latent]
 
-            # KL-divergence of q(z|x) against p(z|x) estimate
+            #self.res_dist = False
+            #if self.res_dist:
+                #mu_q = mu_q + mu_p
+                #logvar_q = logvar_q + logvar_p
+
+            # KL-divergence of q(z|x) against p(z_l|z_<l)
             kl_term = KLDivergence.two_guassians_logvar(mu_q, logvar_q, mu_p, logvar_p)
-            self.add_loss(self.kl_loss_scalar * kl_term)
+            self.add_loss(kl_term * self.kl_loss_scalar)
 
         return s_out
 
