@@ -441,7 +441,7 @@ class Sampling(L.Layer):
         self.sample_out_shape = None
         self.auto_loss = auto_loss  # if True, use self.add_loss(kl_term) in call()
         self.temperature = 1.0
-        self.generate = False
+        self.deterministic = False
 
     def build(self, input_shape):
         #print('Sampling build shape:', input_shape)
@@ -457,9 +457,9 @@ class Sampling(L.Layer):
     def set_temperature(self, new_temp):
         self.temperature = new_temp
         
-    def set_generate_mode(self, generative=True):
-        print('(SAMPLE) Sampling mode set generate', generative)
-        self.generate = generative
+    def set_deterministic_mode(self, set_det=False):
+        #print('(SAMPLE) Sampling mode set deterministic', set_det)
+        self.deterministic = set_det
         
     def call(self, inputs, training=False):
         if isinstance(inputs, (tuple, list)):
@@ -474,8 +474,8 @@ class Sampling(L.Layer):
             self.add_loss(self.loss_scalar * kl_loss)
 
         # Need to figure out when this should be used
-        #print(training, self.generate)
-        if not training or not self.generate:
+        #print(training, self.deterministic)
+        if self.deterministic:
             return z_mean
 
         epsilon = tf.random.normal(shape=tf.shape(z_logvar))
@@ -521,10 +521,9 @@ class MergeCellPeak(L.Layer):
         self.sampling_enc = Sampling(auto_loss=False)
         self.conv_dec_0 = NvaeConv2D(kernel_size=(1, 1), abs_channels=self.shape0[-1])
 
-    def set_generate_mode(self, generative=True):
-        print('(PEAK) Sampling mode set generate', generative)
-        self.generate = generative
-        self.sampling_enc.set_generate(generative)
+    def set_generate_mode(self, set_det=True):
+        print('(PEAK) Sampling mode set generate', set_det)
+        self.generate = set_det
 
     def call(self, s_enc, training=False):
         batch_size = tf.shape(s_enc)[0]
@@ -594,11 +593,9 @@ class MergeCell(L.Layer):
         self.sampling_enc = Sampling(auto_loss=False)
         self.sampling_dec = Sampling(auto_loss=False)
 
-    def set_generate_mode(self, generative=True):
-        print('(REG) Sampling mode set generate', generative)
-        self.generate = generative
-        self.sampling_dec.set_generate(generative)
-        self.sampling_enc.set_generate(generative)
+    def set_generate_mode(self, set_det=True):
+        print('(REG) Sampling mode set generate', set_det)
+        self.generate = set_det
 
     def set_temperature(self, new_temp):
         self.sampling_dec.set_temperature(new_temp)
@@ -606,7 +603,8 @@ class MergeCell(L.Layer):
 
     def call(self, s_enc_dec_pair, training=False):
         if self.generate:
-            assert not training, 'Cannot generate in training mode!'
+            #assert not training, 'Cannot generate in training mode!'
+            self.sampling_dec.set_deterministic_mode(False)
             _, s_dec = s_enc_dec_pair
             x = tf.keras.activations.elu(s_dec)
             params_p = self.conv_dec_1(x, training=training)
@@ -616,6 +614,7 @@ class MergeCell(L.Layer):
             s_out = self.conv_dec_0(L.Concatenate(axis=-1)([z, s_dec]), training=training)
         else:
             # With encoder
+            self.sampling_dec.set_deterministic_mode(False)
             s_enc, s_dec = s_enc_dec_pair
             ftr = s_enc + self.conv_enc_0(s_dec, training=training)
             params_q = self.conv_enc_1(ftr, training=training)
