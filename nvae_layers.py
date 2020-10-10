@@ -1,3 +1,4 @@
+import numpy as np
 import tensorflow as tf
 import tensorflow.keras.layers as L
 import tensorflow_addons as tfa
@@ -435,78 +436,61 @@ class Sampling(L.Layer):
     """
     Uses (z_mean, z_logvar) to sample z, the vector encoding a digit.
     """
-    def __init__(self, loss_scalar=1.0, auto_loss=True, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.loss_scalar = loss_scalar
         self.sample_out_shape = None
-        self.auto_loss = auto_loss  # if True, use self.add_loss(kl_term) in call()
         self.temperature = 1.0
         self.deterministic = False
 
     def build(self, input_shape):
-        #print('Sampling build shape:', input_shape)
-        if isinstance(input_shape, (tuple, list)):
-            shape1, shape2 = input_shape
-            assert list(shape1) == list(shape2), f'Sample input mismatch: {shape1} != {shape2}'
-        else:
-            # One tensor passed in, needs to be split into two:
-            shape1 = input_shape[:-1] + (input_shape[-1] // 2,)
-
-        self.sample_out_shape = shape1
+        #print('Sampling input shape:', input_shape)
+        # One tensor passed in, needs to be split into two along last axis
+        assert input_shape[-1] % 2 == 0
+        self.sample_out_shape = input_shape[:-1] + (input_shape[-1] // 2,)
         
     def set_temperature(self, new_temp):
         self.temperature = new_temp
         
     def set_deterministic_mode(self, set_det=False):
-        #print('(SAMPLE) Sampling mode set deterministic', set_det)
         self.deterministic = set_det
         
     def call(self, inputs, training=False):
-        if isinstance(inputs, (tuple, list)):
-            z_mean, z_logvar = inputs
-        else:
-            # If it's a single tensor, assume half channels are mu, half are log-var
-            z_mean = inputs[:, :, :, self.sample_out_shape[-1]:]
-            z_logvar = inputs[:, :, :, :self.sample_out_shape[-1]]
-
-        if self.auto_loss:
-            kl_loss = KLDivergence.vs_unit_normal(z_mean, z_logvar)
-            self.add_loss(self.loss_scalar * kl_loss)
+        # If it's a single tensor, assume half channels are mu, half are log-var
+        z_mean = inputs[:, :, :, self.sample_out_shape[-1]:]
+        z_logvar = inputs[:, :, :, :self.sample_out_shape[-1]]
 
         # Need to figure out when this should be used
-        #print(training, self.deterministic)
         if self.deterministic:
-            return z_mean
+            return z_mean, z_mean, z_logvar
 
         epsilon = tf.random.normal(shape=tf.shape(z_logvar))
         
         if self.temperature != 1.0:
             print('Using temp:', self.temperature)
             
-        return z_mean + tf.exp(0.5 * z_logvar) * epsilon * self.temperature
+        sampled = z_mean + tf.exp(0.5 * z_logvar) * epsilon * self.temperature
+        return sampled, z_mean, z_logvar
 
     def compute_output_shape(self, input_shape):
         return self.sample_out_shape
-
-    def get_config(self):
-        cfg = super().get_config()
-        cfg.update({
-            'loss_scalar': self.loss_scalar
-        })
-        return cfg
 
 
 class MergeCellPeak(L.Layer):
     """
     The peak merge cell is a bit different than the rest, tracking the trainable
     param at the peak and takes either peak encoder output alone, or a random sample
+
+    In the NVLabs code they some times refer to this peak encoder as "encoder0",
+    the trainable param at the top "h0" or "ftr0", and it's sampled output, "z0"
     """
-    def __init__(self, num_latent, peak_shape, kl_loss_scalar=0.2, *args, **kwargs):
+    def __init__(self, num_latent, peak_shape, kl_loss_scalar=0.0001, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_latent = num_latent
         self.kl_loss_scalar = kl_loss_scalar
         self.shape0 = peak_shape
-        self.generate = False
+        self.merge_mode = None
+        self.temperature = 1.0
+        self.last_z_output = None
 
         if len(self.shape0) == 3:
             self.shape0 = (1,) + self.shape0
@@ -517,35 +501,56 @@ class MergeCellPeak(L.Layer):
                                   trainable=True)
         
         self.encoder0 = NvaeConv2D(kernel_size=(1, 1))
-        self.conv_enc_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
-        self.sampling_enc = Sampling(auto_loss=False)
         self.conv_dec_0 = NvaeConv2D(kernel_size=(1, 1), abs_channels=self.shape0[-1])
+        self.conv_enc_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
+        self.sampling_enc = Sampling()
+        self.set_merge_mode('merge')
+        print(f'(PEAK) kl_loss_scalar={kl_loss_scalar}')
 
-    def set_generate_mode(self, set_det=True):
-        print('(PEAK) Sampling mode set generate', set_det)
-        self.generate = set_det
+    def set_temperature(self, new_temp):
+        self.temperature = new_temp
+        self.sampling_enc.set_temperature(new_temp)
+
+    def set_merge_mode(self, new_mode='merge'):
+        self.merge_mode = new_mode
+        assert self.merge_mode in ['merge', 'sample', 'dictate']
+        print('(PEAK) Merge mode set to', new_mode)
 
     def call(self, s_enc, training=False):
-        batch_size = tf.shape(s_enc)[0]
-        if self.generate:
-            assert not training, 'Cannot generate in training mode!'
-            print('Generate mode')
-            side = self.shape0[-3]
-            z = tf.random.normal((batch_size, side, side, self.num_latent))
-            # Need to set these for loss calc later, even though not in training mode
-            mu_q = tf.zeros_like(z)
-            logvar_q = tf.zeros_like(z)
-        else:
-            # With encoder
+        """
+        :param s_enc: Either encoder side output (when bidirectional), or dictated value
+                      This is always used for batch_size, so in sample mode we need to
+                      pass in anything that has shape[0] == batch_size
+        :return:
+        """
+        if training:
+            assert self.merge_mode == 'merge'
+
+        # Calling this layer f
+        batch_size = 1 if s_enc is None else tf.shape(s_enc)[0]
+
+        if self.merge_mode == 'merge':
             s_enc = tf.keras.activations.elu(s_enc)
             s_enc = self.encoder0(s_enc, training=training)
             s_enc = tf.keras.activations.elu(s_enc)
 
             params_q = self.conv_enc_1(s_enc, training=training)
-            mu_q = params_q[:, :, :, self.num_latent:]
-            logvar_q = params_q[:, :, :, :self.num_latent]
-            z = self.sampling_enc([mu_q, logvar_q], training=training)
-            
+            z, mu_q, logvar_q = self.sampling_enc(params_q)
+        elif self.merge_mode == 'sample':
+            assert not training
+            side = self.shape0[-3]
+            z = tf.random.normal((batch_size, side, side, self.num_latent), stddev=self.temperature)
+            # Need to set these for loss calc later, even though not in training mode
+            mu_q = tf.zeros_like(z)
+            logvar_q = tf.zeros_like(z)
+        else:  # merge_mode == 'dictate'
+            # In dictate mode, s_enc is actually the post-sampled output we want
+            assert not training
+            z = s_enc
+            mu_q = tf.zeros_like(z)
+            logvar_q = tf.zeros_like(z)
+
+        self.last_z_output = z
         h0_tiled = tf.tile(self.h0, [batch_size, 1, 1, 1])
 
         merge = L.Concatenate(axis=-1)([z, h0_tiled])
@@ -563,7 +568,7 @@ class MergeCell(L.Layer):
     We initialize with the output of the encoder side, which is created before
     """
 
-    def __init__(self, num_latent, kl_loss_scalar=0.2, res_dist=True, *args, **kwargs):
+    def __init__(self, num_latent, kl_loss_scalar=0.0001, res_dist=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_latent = num_latent
         self.kl_loss_scalar = kl_loss_scalar
@@ -574,9 +579,13 @@ class MergeCell(L.Layer):
         self.conv_dec_0 = None
         self.conv_dec_1 = None
         self.sampling_dec = None
-        self.generate = False
+        self.merge_mode = None
         self.res_dist = res_dist
-        print(f'kl_loss_scalar={kl_loss_scalar}')
+        self.temperature = 1.0
+        self.last_z_output = None
+
+        self.set_merge_mode('merge')
+        print(f'(REG) kl_loss_scalar={kl_loss_scalar}')
 
     def build(self, input_shape):
         s_enc_shape, s_dec_shape = input_shape
@@ -590,54 +599,74 @@ class MergeCell(L.Layer):
         self.conv_dec_0 = NvaeConv2D(kernel_size=(1, 1), abs_channels=self.orig_chan)
         self.conv_dec_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
 
-        self.sampling_enc = Sampling(auto_loss=False)
-        self.sampling_dec = Sampling(auto_loss=False)
+        self.sampling_enc = Sampling()
+        self.sampling_dec = Sampling()
 
-    def set_generate_mode(self, set_det=True):
-        print('(REG) Sampling mode set generate', set_det)
-        self.generate = set_det
+    def set_merge_mode(self, new_mode='merge'):
+        self.merge_mode = new_mode
+        assert self.merge_mode in ['merge', 'sample', 'dictate']
+        print('(REG) Merge mode set to', new_mode)
 
     def set_temperature(self, new_temp):
+        self.temperature = new_temp
         self.sampling_dec.set_temperature(new_temp)
         self.sampling_enc.set_temperature(new_temp)
 
     def call(self, s_enc_dec_pair, training=False):
-        if self.generate:
-            #assert not training, 'Cannot generate in training mode!'
-            self.sampling_dec.set_deterministic_mode(False)
-            _, s_dec = s_enc_dec_pair
-            x = tf.keras.activations.elu(s_dec)
-            params_p = self.conv_dec_1(x, training=training)
-            mu_p = params_p[:, :, :, self.num_latent:]
-            logvar_p = params_p[:, :, :, :self.num_latent]
-            z = self.sampling_dec([mu_p, logvar_p], training=training)
-            s_out = self.conv_dec_0(L.Concatenate(axis=-1)([z, s_dec]), training=training)
-        else:
-            # With encoder
-            self.sampling_dec.set_deterministic_mode(False)
-            s_enc, s_dec = s_enc_dec_pair
+        """
+        :param s_enc_dec_pair: s_enc,s_dec. For dictate mode, set s_enc which is post-sampled vals
+        """
+        s_enc, s_dec = s_enc_dec_pair
+
+        # Right Side: p(z_l | z_<l), calc independently of merge mode, training mode
+        x = tf.keras.activations.elu(s_dec)
+        params_p = self.conv_dec_1(x, training=training)
+
+        z_p, mu_p, logvar_p = self.sampling_dec(params_p, training=training)
+        #if not training:
+            #z_p = mu_p
+
+        right_side = self.conv_dec_0(L.Concatenate(axis=-1)([z_p, s_dec]), training=training)
+
+        #left_coeff = np.random.uniform()
+        left_coeff = 1.0
+        if not training:
+            left_coeff = 0.0
+
+        # This calculates the left_side which is very different depending on mode
+        if self.merge_mode == 'merge':
             ftr = s_enc + self.conv_enc_0(s_dec, training=training)
             params_q = self.conv_enc_1(ftr, training=training)
-            mu_q = params_q[:, :, :, self.num_latent:]
-            logvar_q = params_q[:, :, :, :self.num_latent]
+            z_q, mu_q, logvar_q = self.sampling_enc(params_q, training=training)
+            if not training:
+                z_q = mu_q
+            left_side = self.conv_dec_0(L.Concatenate(axis=-1)([z_q, s_dec]), training=training)
+            self.last_z_output = z_q
+            s_out = left_side
+        elif self.merge_mode == 'sample':
+            # During sample mode, we use the right-side only which was already calculated
+            left_side = tf.zeros_like(right_side)
+            merge_coeffs = [0.0, 1.0]
+            mu_q = tf.zeros_like(mu_p)
+            logvar_q = tf.zeros_like(logvar_p)
+            s_out = right_side
+        else:  # merge_mode == 'dictate'
+            z_q = s_enc
+            mu_q = tf.zeros_like(z_q)
+            logvar_q = tf.zeros_like(z_q)
+            left_side = self.conv_dec_0(L.Concatenate(axis=-1)([z_q, s_dec]), training=training)
 
-            z = self.sampling_enc([mu_q, logvar_q], training=training)
-            s_out = self.conv_dec_0(L.Concatenate(axis=-1)([z, s_dec]), training=training)
+        #right_coeff = 1.0 - left_coeff
+        #s_out = left_coeff * left_side + right_coeff * right_side
 
-            # Before returning, we need to compute the DecoderSampler and KL terms
-            s_dec = tf.keras.activations.elu(s_dec)
-            params_p = self.conv_dec_1(s_dec, training=training)
-            mu_p = params_p[:, :, :, self.num_latent:]
-            logvar_p = params_p[:, :, :, :self.num_latent]
-
-            #self.res_dist = False
-            #if self.res_dist:
-                #mu_q = mu_q + mu_p
-                #logvar_q = logvar_q + logvar_p
-
-            # KL-divergence of q(z|x) against p(z_l|z_<l)
-            kl_term = KLDivergence.two_guassians_logvar(mu_q, logvar_q, mu_p, logvar_p)
+        do_unit_norm_q = False
+        if do_unit_norm_q:
+            kl_term = KLDivergence.vs_unit_normal(mu_q, logvar_q)
             self.add_loss(kl_term * self.kl_loss_scalar)
+
+        # KL-divergence of q(z_l | x) against p(z_l | z_<l)
+        kl_term = KLDivergence.two_guassians_logvar(mu_q, logvar_q, mu_p, logvar_p)
+        self.add_loss(kl_term * self.kl_loss_scalar)
 
         return s_out
 

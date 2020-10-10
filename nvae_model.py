@@ -227,12 +227,12 @@ def create_nvae(
             last_group_in_scale = (g == ngroups - 1)
             
             if top_group_in_scale and peak_scale:
-                x = MergeCellPeak(nlatent, peak_shape=h0_shape)(s_enc_peak)
+                x = MergeCellPeak(nlatent, h0_shape, kl_loss_scalar=kl_loss_scalar)(s_enc_peak)
             else:
                 i_merge = s*ngroups + g
                 s_enc = merge_enc_left_side[i_merge]
                 name = f'merge_s{s}_g{g}'                                              
-                x = MergeCell(nlatent, name=name)([s_enc, x])
+                x = MergeCell(nlatent, kl_loss_scalar, name=name)([s_enc, x])
                                                                   
             for c in range(ncells):
                 name = f'decoder_s{s}_g{g}_c{c}'

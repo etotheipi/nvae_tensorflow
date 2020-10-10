@@ -50,7 +50,7 @@ class TestLayerSizes(unittest.TestCase):
     def test_create_nvae(self):
         create_nvae(
             input_shape=(32, 32, 3),
-            base_num_channels=16,
+            base_num_channels=8,
             nscales=2,
             ngroups=2,
             ncells=2,
@@ -98,6 +98,7 @@ class TestLayerSizes(unittest.TestCase):
             num_prepost_blocks=0,
             num_prepost_cells=0)
         self.assertEqual((32, 32, 3), test_model.layers[-1].output_shape[1:])
+
         
 if __name__ == '__main__':
     unittest.main()
