@@ -154,6 +154,7 @@ def create_nvae(
         num_prepost_cells=2,
         kl_loss_scalar=0.001):
 
+    all_merge_cells = []
     # 
     orig_input_shape = input_shape[-3:]  # initial image shape (W, H, Ch)
     side = orig_side = orig_input_shape[0]
@@ -221,19 +222,23 @@ def create_nvae(
     for s in range(nscales):
         peak_scale = (s == 0)
         bottom_scale = (s == nscales - 1)
-        
+
         for g in range(ngroups):
             top_group_in_scale = (g == 0)
             last_group_in_scale = (g == ngroups - 1)
             
             if top_group_in_scale and peak_scale:
-                x = MergeCellPeak(nlatent, h0_shape, kl_loss_scalar=kl_loss_scalar)(s_enc_peak)
+                mcell = MergeCellPeak(nlatent, h0_shape, kl_loss_scalar=kl_loss_scalar)
+                x = mcell(s_enc_peak)
             else:
                 i_merge = s*ngroups + g
                 s_enc = merge_enc_left_side[i_merge]
                 name = f'merge_s{s}_g{g}'                                              
-                x = MergeCell(nlatent, kl_loss_scalar, name=name)([s_enc, x])
-                                                                  
+                mcell = MergeCell(nlatent, kl_loss_scalar, name=name)
+                x = mcell([s_enc, x])
+
+            all_merge_cells.append(mcell)
+
             for c in range(ncells):
                 name = f'decoder_s{s}_g{g}_c{c}'
                 x = ResidualDecoderCell(name=name)(x)
@@ -264,8 +269,43 @@ def create_nvae(
     x = outputs = NvaeConv2D(kernel_size=(3, 3), abs_channels=orig_chan, name='tail_stem')(x)
     
     model = tf.keras.Model(inputs=enc_input, outputs=outputs)
+    model.merge_cells = all_merge_cells
     
     return model
+
+
+def set_model_merge_mode(model, new_mode, new_temperature=None):
+    for layer in model.layers:
+        try:
+            old_mode = layer.merge_mode
+            layer.set_merge_mode(new_mode)
+        except Exception as e:
+            pass
     
-    
-    
+    if new_temperature is not None:
+        for layer in model.layers:
+            try:
+                layer.set_temperature(new_temperature)
+            except Exception as e:
+                pass
+        
+    return old_mode
+
+def get_last_z_output(model):
+    return [cell.last_z_output for cell in model.merge_cells]
+
+
+def dictate_next_output(model, z_list, input_shape):
+    prev_merge_mode = set_model_merge_mode(model, 'dictate')
+    for z, cell in zip(z_list, model.merge_cells):
+        cell.next_z_output = z
+        
+    out = model(tf.zeros((1,) + input_shape))
+    set_model_merge_mode(model, prev_merge_mode)
+    return out
+
+
+def linterp_zs(z_list1, z_list2, alpha):
+    return [z1 * alpha + z2 * (1.0 - alpha) for z1, z2 in zip(z_list1, z_list2)]
+
+

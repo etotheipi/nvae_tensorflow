@@ -22,7 +22,7 @@ class LfwDataset:
         return np.clip(tf.squeeze(img / 2.0 + 0.5), 0.0, 1.0)
     
     @staticmethod
-    def resample(img, scale):
+    def resample_rel(img, scale):
         if abs(scale) == 1:
             return img
         
@@ -31,6 +31,10 @@ class LfwDataset:
         else:
             new_side = int(img.shape[-3] * scale)
             
+        return tf.image.resize(img, [new_side, new_side])
+    
+    @staticmethod
+    def resample_abs(img, new_side):
         return tf.image.resize(img, [new_side, new_side])
         
     def tfds_load(self, scale=1, load_count=None):
@@ -59,7 +63,13 @@ class LfwDataset:
         test_ds_unbatched = test_ds_unbatched.map(LfwDataset.scale_and_crop_img)
         
         
-        rescale_func = lambda img: LfwDataset.resample(img, scale)
+        if scale >= 32:
+            # It's the size of the sides
+            rescale_func = lambda img: LfwDataset.resample_abs(img, scale)
+        else:
+            # int/float - scale sides by orig//scale
+            rescale_func = lambda img: LfwDataset.resample_rel(img, scale)
+            
         train_ds_unbatched = train_ds_unbatched.map(rescale_func)
         val_ds_unbatched = val_ds_unbatched.map(rescale_func)
         test_ds_unbatched = test_ds_unbatched.map(rescale_func)

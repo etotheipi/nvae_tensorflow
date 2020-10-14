@@ -270,10 +270,13 @@ class ResidualDecoderCell(L.Layer):
     def get_config(self, *args, **kwargs):
         cfg = super().get_config()
         cfg.update({
-            'expand_ratio', self.expand_ratio,
-            'se_ratio', self.se_ratio,
-            'bn_momentum', self.bn_momentum,
-            'gamma_reg', self.gamma_reg
+             'upsample', self.upsample,
+             'expand_ratio', self.expand_ratio,
+             'se_ratio', self.se_ratio,
+             'bn_momentum', self.bn_momentum,
+             'gamma_reg', self.gamma_reg,
+             'use_bias', self.use_bias,
+             'res_scalar', self.res_scalar,
         })
         return cfg
 
@@ -364,9 +367,12 @@ class ResidualEncoderCell(L.Layer):
     def get_config(self, *args, **kwargs):
         cfg = super().get_config()
         cfg.update({
-            'se_ratio', self.se_ratio,
-            'bn_momentum', self.bn_momentum,
-            'gamma_reg', self.gamma_reg
+             'downsample': self.downsample,
+             'se_ratio': self.se_ratio,
+             'bn_momentum': self.bn_momentum,
+             'gamma_reg': self.gamma_reg,
+             'use_bias': self.use_bias,
+             'res_scalar': self.res_scalar,
         })
         return cfg
 
@@ -491,6 +497,7 @@ class MergeCellPeak(L.Layer):
         self.merge_mode = None
         self.temperature = 1.0
         self.last_z_output = None
+        self.next_z_output = None
 
         if len(self.shape0) == 3:
             self.shape0 = (1,) + self.shape0
@@ -505,7 +512,7 @@ class MergeCellPeak(L.Layer):
         self.conv_enc_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
         self.sampling_enc = Sampling()
         self.set_merge_mode('merge')
-        print(f'(PEAK) kl_loss_scalar={kl_loss_scalar}')
+        #print(f'(PEAK) kl_loss_scalar={kl_loss_scalar}')
 
     def set_temperature(self, new_temp):
         self.temperature = new_temp
@@ -514,7 +521,7 @@ class MergeCellPeak(L.Layer):
     def set_merge_mode(self, new_mode='merge'):
         self.merge_mode = new_mode
         assert self.merge_mode in ['merge', 'sample', 'dictate']
-        print('(PEAK) Merge mode set to', new_mode)
+        #print('(PEAK) Merge mode set to', new_mode)
 
     def call(self, s_enc, training=False):
         """
@@ -546,7 +553,7 @@ class MergeCellPeak(L.Layer):
         else:  # merge_mode == 'dictate'
             # In dictate mode, s_enc is actually the post-sampled output we want
             assert not training
-            z = s_enc
+            z = self.next_z_output
             mu_q = tf.zeros_like(z)
             logvar_q = tf.zeros_like(z)
 
@@ -583,9 +590,10 @@ class MergeCell(L.Layer):
         self.res_dist = res_dist
         self.temperature = 1.0
         self.last_z_output = None
+        self.next_z_output = None
 
         self.set_merge_mode('merge')
-        print(f'(REG) kl_loss_scalar={kl_loss_scalar}')
+        #print(f'(REG) kl_loss_scalar={kl_loss_scalar}')
 
     def build(self, input_shape):
         s_enc_shape, s_dec_shape = input_shape
@@ -605,7 +613,7 @@ class MergeCell(L.Layer):
     def set_merge_mode(self, new_mode='merge'):
         self.merge_mode = new_mode
         assert self.merge_mode in ['merge', 'sample', 'dictate']
-        print('(REG) Merge mode set to', new_mode)
+        #print('(REG) Merge mode set to', new_mode)
 
     def set_temperature(self, new_temp):
         self.temperature = new_temp
@@ -651,15 +659,13 @@ class MergeCell(L.Layer):
             logvar_q = tf.zeros_like(logvar_p)
             s_out = right_side
         else:  # merge_mode == 'dictate'
-            z_q = s_enc
+            z_q = self.next_z_output
             mu_q = tf.zeros_like(z_q)
             logvar_q = tf.zeros_like(z_q)
             left_side = self.conv_dec_0(L.Concatenate(axis=-1)([z_q, s_dec]), training=training)
+            s_out = left_side
 
-        #right_coeff = 1.0 - left_coeff
-        #s_out = left_coeff * left_side + right_coeff * right_side
-
-        do_unit_norm_q = False
+        do_unit_norm_q = True
         if do_unit_norm_q:
             kl_term = KLDivergence.vs_unit_normal(mu_q, logvar_q)
             self.add_loss(kl_term * self.kl_loss_scalar)
