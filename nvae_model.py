@@ -11,6 +11,7 @@ from nvae_layers import MergeCellPeak
 from nvae_layers import MergeCell
 from nvae_layers import NvaeConv2D
 from nvae_layers import Sampling
+from nvae_layers import KLDivergence
 
 class NVAE(tf.keras.Model):
     def __init__(self,
@@ -309,3 +310,14 @@ def linterp_zs(z_list1, z_list2, alpha):
     return [z1 * alpha + z2 * (1.0 - alpha) for z1, z2 in zip(z_list1, z_list2)]
 
 
+custom_model_classes = {
+    'SqueezeExciteLayer': SqueezeExciteLayer,
+    'NvaeConv2D': NvaeConv2D,
+    'ResidualDecoderCell': ResidualDecoderCell,
+    'ResidualEncoderCell': ResidualEncoderCell,
+    'FactorizedDownsample': FactorizedDownsample,
+    'KLDivergence': KLDivergence,
+    'Sampling': Sampling,
+    'MergeCellPeak': MergeCellPeak,
+    'MergeCell': MergeCell,
+}

@@ -32,8 +32,8 @@ class SqueezeExciteLayer(L.Layer):
         cfg.update({'ratio': self.ratio})
         return cfg
 
-    
-class NvaeConv2D(tf.keras.layers.Layer):
+
+class NvaeConv2D(L.Layer):
     def __init__(self,
                  kernel_size,
                  scale_channels=1,
@@ -136,19 +136,22 @@ class NvaeConv2D(tf.keras.layers.Layer):
         return x
        
     def get_config(self):
-        # TODO: UPDATE this
         cfg = super().get_config()
         cfg.update({
-            "abs_channels": self.abs_channels,
-            "scale_channels": self.scale_channels,
             "kernel_size": self.kernel_size,
+            "scale_channels": self.scale_channels,
+            "downsample": self.downsample,
+            "upsample": self.upsample,
             "depthwise": self.depthwise,
             "use_bias": self.use_bias,
             "weight_norm": self.weight_norm,
             "spectral_norm": self.spectral_norm,
             "dilation_rate": self.dilation_rate,
             "activation": self.activation,
+            "padding": self.padding,
+            "abs_channels": self.abs_channels,
         })
+        return cfg
 
 
 class ResidualDecoderCell(L.Layer):
@@ -270,13 +273,13 @@ class ResidualDecoderCell(L.Layer):
     def get_config(self, *args, **kwargs):
         cfg = super().get_config()
         cfg.update({
-             'upsample', self.upsample,
-             'expand_ratio', self.expand_ratio,
-             'se_ratio', self.se_ratio,
-             'bn_momentum', self.bn_momentum,
-             'gamma_reg', self.gamma_reg,
-             'use_bias', self.use_bias,
-             'res_scalar', self.res_scalar,
+             'upsample': self.upsample,
+             'expand_ratio': self.expand_ratio,
+             'se_ratio': self.se_ratio,
+             'bn_momentum': self.bn_momentum,
+             'gamma_reg': self.gamma_reg,
+             'use_bias': self.use_bias,
+             'res_scalar': self.res_scalar,
         })
         return cfg
 
@@ -512,7 +515,6 @@ class MergeCellPeak(L.Layer):
         self.conv_enc_1 = NvaeConv2D(kernel_size=(3, 3), abs_channels=2*self.num_latent)
         self.sampling_enc = Sampling()
         self.set_merge_mode('merge')
-        #print(f'(PEAK) kl_loss_scalar={kl_loss_scalar}')
 
     def set_temperature(self, new_temp):
         self.temperature = new_temp
@@ -521,7 +523,6 @@ class MergeCellPeak(L.Layer):
     def set_merge_mode(self, new_mode='merge'):
         self.merge_mode = new_mode
         assert self.merge_mode in ['merge', 'sample', 'dictate']
-        #print('(PEAK) Merge mode set to', new_mode)
 
     def call(self, s_enc, training=False):
         """
@@ -569,6 +570,14 @@ class MergeCellPeak(L.Layer):
 
         return s_out
 
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({
+            'num_latent': self.num_latent,
+            'peak_shape': self.shape0,
+            'kl_loss_scalar': self.kl_loss_scalar,
+        })
+        return cfg
 
 class MergeCell(L.Layer):
     """
@@ -593,7 +602,6 @@ class MergeCell(L.Layer):
         self.next_z_output = None
 
         self.set_merge_mode('merge')
-        #print(f'(REG) kl_loss_scalar={kl_loss_scalar}')
 
     def build(self, input_shape):
         s_enc_shape, s_dec_shape = input_shape
@@ -613,7 +621,6 @@ class MergeCell(L.Layer):
     def set_merge_mode(self, new_mode='merge'):
         self.merge_mode = new_mode
         assert self.merge_mode in ['merge', 'sample', 'dictate']
-        #print('(REG) Merge mode set to', new_mode)
 
     def set_temperature(self, new_temp):
         self.temperature = new_temp
@@ -635,11 +642,6 @@ class MergeCell(L.Layer):
             #z_p = mu_p
 
         right_side = self.conv_dec_0(L.Concatenate(axis=-1)([z_p, s_dec]), training=training)
-
-        #left_coeff = np.random.uniform()
-        left_coeff = 1.0
-        if not training:
-            left_coeff = 0.0
 
         # This calculates the left_side which is very different depending on mode
         if self.merge_mode == 'merge':
@@ -675,5 +677,14 @@ class MergeCell(L.Layer):
         self.add_loss(kl_term * self.kl_loss_scalar)
 
         return s_out
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({
+            'num_latent': self.num_latent,
+            'kl_loss_scalar': self.kl_loss_scalar,
+            'res_dist': self.res_dist,
+        })
+        return cfg
 
 
