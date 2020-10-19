@@ -115,9 +115,8 @@ class NVAE(tf.keras.Model):
                     x = ResidualDecoderCell(name=name)(x)
 
                 # Get the combiner
-                i_merge = s * ngroups + g
-                enc_x = merge_enc_left_side[i_merge]
-                merge_sampled = CombinerSampler(kl_loss_scalar, name=f'combine_{i_merge}')([enc_x, x])
+                enc_x = merge_enc_left_side[s][g]
+                merge_sampled = CombinerSampler(kl_loss_scalar, name=f'combine_{s}_{g}')([enc_x, x])
                 x = merge_sampled + x
 
                 if g == ngroups - 1 and s != nscales - 1:
@@ -153,10 +152,25 @@ def create_nvae(
         nlatent,
         num_prepost_blocks=2,
         num_prepost_cells=2,
-        kl_loss_scalar=0.001):
+        kl_center_scalar=0.0001,
+        kl_residual_scalar=0.01,
+        use_adaptive_ngroups=True):
 
     all_merge_cells = []
-    # 
+
+    # If adaptive, reduce group sizes by factors of 2
+    if not use_adaptive_ngroups:
+        group_size_list = [ngroups] * nscales
+    else:
+        group_size_list = [max(ngroups // 2**s, 2) for s in range(nscales)]
+
+        # We reverse the list because the peak of the arch is actually s=0
+        group_size_list = group_size_list[::-1]
+
+    print('Group sizes', group_size_list)
+
+
+    #
     orig_input_shape = input_shape[-3:]  # initial image shape (W, H, Ch)
     side = orig_side = orig_input_shape[0]
     orig_chan = orig_input_shape[-1]
@@ -168,7 +182,7 @@ def create_nvae(
     h0_chan = base_num_channels * sm_scale_factor
     h0_shape = (h0_side, h0_side, h0_chan)
 
-    merge_enc_left_side = {}
+    merge_enc_left_side = defaultdict(dict)
 
     # Let's get this party started
     x = enc_input = L.Input(input_shape)
@@ -193,8 +207,10 @@ def create_nvae(
     # We treat the top of the tower as (scale, group) == (0, 0), so reverse the loops
     for s in list(range(nscales))[::-1]:
         peak_scale = (s == 0)
+        ngroups_this_scale = group_size_list[s]
+        print(f'Enc s={s}, ngrps={ngroups_this_scale}')
         
-        for g in list(range(ngroups))[::-1]:
+        for g in list(range(ngroups_this_scale))[::-1]:
             top_group_in_scale = (g == 0)
             
             for c in range(ncells):
@@ -205,7 +221,7 @@ def create_nvae(
 
             # The last encoder output gets combined with h0
             if not (top_group_in_scale and peak_scale):
-                merge_enc_left_side[s*ngroups + g] = x
+                merge_enc_left_side[s][g] = x
                     
             if top_group_in_scale and not peak_scale:
                 name = f'encoder_s{s}_g{g}_down'
@@ -223,19 +239,23 @@ def create_nvae(
     for s in range(nscales):
         peak_scale = (s == 0)
         bottom_scale = (s == nscales - 1)
+        ngroups_this_scale = group_size_list[s]
+        print(f'Dec s={s}, ngrps={ngroups_this_scale}')
 
-        for g in range(ngroups):
+        for g in range(ngroups_this_scale):
             top_group_in_scale = (g == 0)
-            last_group_in_scale = (g == ngroups - 1)
+            last_group_in_scale = (g == ngroups_this_scale - 1)
             
             if top_group_in_scale and peak_scale:
-                mcell = MergeCellPeak(nlatent, h0_shape, kl_loss_scalar=kl_loss_scalar)
+                mcell = MergeCellPeak(nlatent, h0_shape, kl_center_scalar=kl_center_scalar)
                 x = mcell(s_enc_peak)
             else:
-                i_merge = s*ngroups + g
-                s_enc = merge_enc_left_side[i_merge]
+                s_enc = merge_enc_left_side[s][g]
                 name = f'merge_s{s}_g{g}'                                              
-                mcell = MergeCell(nlatent, kl_loss_scalar, name=name)
+                mcell = MergeCell(nlatent,
+                                  kl_center_scalar=kl_center_scalar,
+                                  kl_residual_scalar=kl_residual_scalar,
+                                  name=name)
                 x = mcell([s_enc, x])
 
             all_merge_cells.append(mcell)

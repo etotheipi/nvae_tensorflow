@@ -492,10 +492,10 @@ class MergeCellPeak(L.Layer):
     In the NVLabs code they some times refer to this peak encoder as "encoder0",
     the trainable param at the top "h0" or "ftr0", and it's sampled output, "z0"
     """
-    def __init__(self, num_latent, peak_shape, kl_loss_scalar=0.0001, *args, **kwargs):
+    def __init__(self, num_latent, peak_shape, kl_center_scalar=0.0001, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_latent = num_latent
-        self.kl_loss_scalar = kl_loss_scalar
+        self.kl_center_scalar = kl_center_scalar
         self.shape0 = peak_shape
         self.merge_mode = None
         self.temperature = 1.0
@@ -566,7 +566,7 @@ class MergeCellPeak(L.Layer):
 
         # KL-divergence of q(z|x) against N(0,1)
         kl_term = KLDivergence.vs_unit_normal(mu_q, logvar_q)
-        self.add_loss(self.kl_loss_scalar * kl_term)
+        self.add_loss(self.kl_center_scalar * kl_term)
 
         return s_out
 
@@ -575,7 +575,7 @@ class MergeCellPeak(L.Layer):
         cfg.update({
             'num_latent': self.num_latent,
             'peak_shape': self.shape0,
-            'kl_loss_scalar': self.kl_loss_scalar,
+            'kl_center_scalar': self.kl_center_scalar,
         })
         return cfg
 
@@ -584,10 +584,17 @@ class MergeCell(L.Layer):
     We initialize with the output of the encoder side, which is created before
     """
 
-    def __init__(self, num_latent, kl_loss_scalar=0.0001, res_dist=False, *args, **kwargs):
+    def __init__(self,
+                 num_latent,
+                 kl_center_scalar=0.0001,
+                 kl_residual_scalar=0.01,
+                 res_dist=False,
+                 *args,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.num_latent = num_latent
-        self.kl_loss_scalar = kl_loss_scalar
+        self.kl_center_scalar = kl_center_scalar
+        self.kl_residual_scalar = kl_residual_scalar
         self.orig_chan = None
         self.conv_enc_0 = None
         self.conv_enc_1 = None
@@ -667,14 +674,14 @@ class MergeCell(L.Layer):
             left_side = self.conv_dec_0(L.Concatenate(axis=-1)([z_q, s_dec]), training=training)
             s_out = left_side
 
-        do_unit_norm_q = True
+        do_unit_norm_q = False
         if do_unit_norm_q:
             kl_term = KLDivergence.vs_unit_normal(mu_q, logvar_q)
-            self.add_loss(kl_term * self.kl_loss_scalar)
+            self.add_loss(kl_term * self.kl_center_scalar)
 
         # KL-divergence of q(z_l | x) against p(z_l | z_<l)
         kl_term = KLDivergence.two_guassians_logvar(mu_q, logvar_q, mu_p, logvar_p)
-        self.add_loss(kl_term * self.kl_loss_scalar)
+        self.add_loss(kl_term * self.kl_residual_scalar)
 
         return s_out
 
@@ -682,7 +689,8 @@ class MergeCell(L.Layer):
         cfg = super().get_config()
         cfg.update({
             'num_latent': self.num_latent,
-            'kl_loss_scalar': self.kl_loss_scalar,
+            'kl_center_scalar': self.kl_center_scalar,
+            'kl_residual_scalar': self.kl_residual_scalar,
             'res_dist': self.res_dist,
         })
         return cfg
