@@ -1,7 +1,7 @@
 import os
 import unittest
 from nvae_layers import *
-from nvae_model import create_nvae
+from nvae_model_functional import create_nvae
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import tensorflow as tf
 
@@ -24,6 +24,7 @@ class TestLayerSizes(unittest.TestCase):
         x = NvaeConv2D(kernel_size=1, abs_channels=3)(x)
 
         test_model = tf.keras.Model(inputs=inputs, outputs=x)
+        print(test_model(tf.zeros(shape=(4, 32, 32, 3))))
         self.assertEqual((32, 32, 3), test_model.layers[-1].output_shape[1:])
                          
             
@@ -45,10 +46,11 @@ class TestLayerSizes(unittest.TestCase):
         x = NvaeConv2D(kernel_size=3, abs_channels=3)(x)
 
         test_model = tf.keras.Model(inputs=inputs, outputs=x)
+        print(test_model(tf.zeros(shape=(4, 32, 32, 3))))
         self.assertEqual((32, 32, 3), test_model.layers[-1].output_shape[1:])
 
     def test_create_nvae(self):
-        create_nvae(
+        test_model = create_nvae(
             input_shape=(32, 32, 3),
             base_num_channels=8,
             nscales=2,
@@ -62,7 +64,7 @@ class TestLayerSizes(unittest.TestCase):
         self.assertEqual((32, 32, 3), test_model.layers[-1].output_shape[1:])
                          
     def test_no_prepost_step(self):
-        create_nvae(
+        test_model = create_nvae(
             input_shape=(32, 32, 3),
             base_num_channels=16,
             nscales=2,
@@ -76,7 +78,7 @@ class TestLayerSizes(unittest.TestCase):
         self.assertEqual((32, 32, 3), test_model.layers[-1].output_shape[1:])
         
     def test_one_scale(self):
-        create_nvae(
+        test_model = create_nvae(
             input_shape=(32, 32, 3),
             base_num_channels=16,
             nscales=1,
@@ -88,7 +90,7 @@ class TestLayerSizes(unittest.TestCase):
         self.assertEqual((32, 32, 3), test_model.layers[-1].output_shape[1:])
         
     def test_one_group(self):
-        create_nvae(
+        test_model = create_nvae(
             input_shape=(32, 32, 3),
             base_num_channels=16,
             nscales=2,

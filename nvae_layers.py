@@ -522,7 +522,7 @@ class MergeCellPeak(L.Layer):
 
     def set_merge_mode(self, new_mode='merge'):
         self.merge_mode = new_mode
-        assert self.merge_mode in ['merge', 'sample', 'dictate']
+        assert self.merge_mode in ['merge', 'sample', 'dictate'], f'Bad merge mode: {self.merge_mode}'
 
     def call(self, s_enc, training=False):
         """
@@ -596,6 +596,7 @@ class MergeCell(L.Layer):
         self.kl_center_scalar = kl_center_scalar
         self.kl_residual_scalar = kl_residual_scalar
         self.orig_chan = None
+        self.orig_side = None
         self.conv_enc_0 = None
         self.conv_enc_1 = None
         self.sampling_enc = None
@@ -613,6 +614,7 @@ class MergeCell(L.Layer):
     def build(self, input_shape):
         s_enc_shape, s_dec_shape = input_shape
         self.orig_chan = s_enc_shape[-1]
+        self.orig_side = s_enc_shape[-2]
 
         # print('CombSample build shape:', input_shape)
         assert list(s_enc_shape) == list(s_dec_shape), f's_enc:{s_enc_shape} != s_dec:{s_dec_shape}'
@@ -627,7 +629,7 @@ class MergeCell(L.Layer):
 
     def set_merge_mode(self, new_mode='merge'):
         self.merge_mode = new_mode
-        assert self.merge_mode in ['merge', 'sample', 'dictate']
+        assert self.merge_mode in ['merge', 'sample', 'dictate'], f'Bad merge mode: {self.merge_mode}'
 
     def set_temperature(self, new_temp):
         self.temperature = new_temp
@@ -674,7 +676,7 @@ class MergeCell(L.Layer):
             left_side = self.conv_dec_0(L.Concatenate(axis=-1)([z_q, s_dec]), training=training)
             s_out = left_side
 
-        do_unit_norm_q = False
+        do_unit_norm_q = True
         if do_unit_norm_q:
             kl_term = KLDivergence.vs_unit_normal(mu_q, logvar_q)
             self.add_loss(kl_term * self.kl_center_scalar)
