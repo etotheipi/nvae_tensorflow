@@ -12,11 +12,13 @@ Features and Limitations:
 * ✓ Written in Tensorflow 2.3, Python 3.8.2
 * ✓ Dynamic multi-scale, multi-group, multi-cell architecture ✓
 * ✓ Spectral Normalization via tensorflow_addons ✓
-* ✓ Adaptive Group Sizes
-* ✓ Added the ability to blend two images by merging their sampled p(z|z<l)
+* ✓ Adaptive Group Sizes ✓
+* ✓ Added the ability to blend two images by merging their sampled p(z|z<l) ✓
 * ✗ Residual normal distribution (not implemented) ✗ 
 * ✗ Normalizing flows (not implemented) ✗ 
-* ✗ Sampling doesn't work quite right, yet
+* ✗ Sampling doesn't work quite right, yet ✗ 
+
+Models were trained with a GTX 970 w/ 4GB of GPU RAM. 
 
 ### Reconstruction of 64x64 face images passing through NVAE
 Only minimal degradation of images going back and forth through both sides (encoder & decoder)
